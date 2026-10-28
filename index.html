@@ -272,6 +272,15 @@
             </select>
           </div>
 
+          <div class="file-picker-group">
+            <label for="audioFileInput" class="control-label">Custom Audio Source</label>
+            <div class="file-picker-row">
+              <input type="file" id="audioFileInput" accept="audio/*" class="file-input">
+              <button id="btnResetAudio" class="btn btn-ghost btn-sm" type="button" title="Restore default synthesized tone">Reset</button>
+            </div>
+            <small id="audioSourceLabel" class="field-help">Default: Synthesized tone (Alarm / Beep)</small>
+          </div>
+
           <div class="slider-group">
             <label for="volumeSlider" class="control-label">
               <span>Volume</span>

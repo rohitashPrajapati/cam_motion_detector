@@ -157,6 +157,9 @@ const dom = {
 
   // Audio Controls
   soundTypeSelect: document.getElementById('soundTypeSelect'),
+  audioFileInput: document.getElementById('audioFileInput'),
+  btnResetAudio: document.getElementById('btnResetAudio'),
+  audioSourceLabel: document.getElementById('audioSourceLabel'),
   volumeSlider: document.getElementById('volumeSlider'),
   volumeVal: document.getElementById('volumeVal'),
   muteToggle: document.getElementById('muteToggle'),
@@ -1765,6 +1768,24 @@ function initEventListeners() {
     persistSettings();
   });
 
+  dom.audioFileInput.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (file && audioAlert) {
+      await audioAlert.setCustomAudioFile(file);
+      dom.audioSourceLabel.textContent = `Custom: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+      showToast(`Loaded custom audio: ${file.name}`, 'success');
+    }
+  });
+
+  dom.btnResetAudio.addEventListener('click', async () => {
+    if (audioAlert) {
+      await audioAlert.resetToDefaultAudio();
+      dom.audioFileInput.value = '';
+      dom.audioSourceLabel.textContent = 'Default: Synthesized tone (Alarm / Beep)';
+      showToast('Restored default synthesized sound', 'info');
+    }
+  });
+
   dom.volumeSlider.addEventListener('input', (e) => {
     dom.volumeVal.textContent = `${e.target.value}%`;
     audioAlert.setVolume(Number(e.target.value) / 100);
@@ -1863,6 +1884,24 @@ window.addEventListener('DOMContentLoaded', () => {
   setupPointerInteractions();
   initEventListeners();
   loadPersistedSettings();
+
+  // Restore persisted custom media source labels
+  if (videoPlayer && videoPlayer.readyPromise) {
+    videoPlayer.readyPromise.then(() => {
+      if (videoPlayer.hasCustomVideo && videoPlayer.customVideoName) {
+        dom.videoSourceLabel.textContent = `Custom: ${videoPlayer.customVideoName}`;
+      }
+    });
+  }
+
+  if (audioAlert && audioAlert.readyPromise) {
+    audioAlert.readyPromise.then(() => {
+      if (audioAlert.hasCustomAudio && audioAlert.customAudioName) {
+        dom.audioSourceLabel.textContent = `Custom: ${audioAlert.customAudioName}`;
+      }
+    });
+  }
+
   resizeOverlayCanvas();
   updateUI();
   drawOverlay();

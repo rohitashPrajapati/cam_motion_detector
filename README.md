@@ -60,26 +60,29 @@ cam_motion_detector/
 - **IndexedDB Persistence**: Stores custom uploaded video files in local browser IndexedDB across page reloads.
 
 ### `audio-alert.js`
-- **Web Audio API**: 100% synthesized sound output without external audio files.
+- **Web Audio API**: Synthesized sound output (Alarm & Beep) and decoded custom audio playback.
+- **Custom Audio Picker**: Allows picking any audio file (`.mp3`, `.wav`, `.aac`, `.m4a`, `.ogg`) from local device.
+- **IndexedDB Persistence**: Saves custom audio blob and filename to IndexedDB, automatically restoring on page refresh.
 - **Single-Voice Policy**: Enforces playback cooldown locks to eliminate sound overlapping and audio distortion.
+- **Gain Routing**: Routes custom audio through master gain node to fully respect volume slider and mute controls.
 
 ---
 
-## 3. How to Replace the Bundled Video & Supported Formats
+## 3. How to Configure Custom Video & Audio Alerts
 
-### Recommended Video Formats:
-- **Container**: MP4 (`.mp4`)
-- **Video Codec**: H.264 (AVC) Baseline or Main Profile, Level 3.1
-- **Audio Codec**: AAC-LC (Stereo or Mono, 44.1 kHz / 48 kHz, 128 kbps)
-- **Pixel Format**: YUV 4:2:0 (`yuv420p`)
-- **Why?**: H.264 + AAC in an MP4 container has 100% universal hardware playback support across all versions of iOS Safari, Android Chrome, macOS Safari, Windows, and Linux.
+### Custom Video Alerts:
+- **Recommended Video Formats**: MP4 (H.264 video codec + AAC audio codec).
+- **Default Asset**: `assets/alert-video.mp4`.
+- **Custom Picker**: Choose any video file via the **"Custom Video Source" file picker** in settings. Saved directly into IndexedDB (`GroundMotionDetectorDB`) and persists across reloads.
+- **Reset**: Tap **Reset** to revert back to `assets/alert-video.mp4`.
 
-### Replacing the Default Video:
-1. Copy your MP4 file to the `assets/` directory and name it `alert-video.mp4`:
-   ```bash
-   cp /path/to/your/video.mp4 assets/alert-video.mp4
-   ```
-2. Or use the in-app **"Custom Video Source" file picker** in the settings panel to choose any video file directly from your phone or computer. The chosen video is saved to IndexedDB and persists across browser refreshes!
+### Custom Audio Alerts:
+- **Supported Audio Formats**: MP3, WAV, AAC, M4A, OGG, or any audio format supported by browser Web Audio API.
+- **Default Sound**: Pure synthesized rising 3-beep alarm or single beep (no external file needed).
+- **Custom Picker**: Choose your own custom alert sound using the **"Custom Audio Source" file picker** in the Audio & Notification settings card.
+- **IndexedDB Persistence**: Automatically stored in IndexedDB and reloaded upon visit.
+- **Volume & Mute Integration**: Routes through Web Audio gain node, matching the Volume slider and Mute toggle.
+- **Reset**: Tap **Reset** to return to default synthesized sound tones.
 
 ---
 

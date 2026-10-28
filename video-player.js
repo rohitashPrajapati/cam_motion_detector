@@ -14,6 +14,7 @@
 const DB_NAME = 'GroundMotionDetectorDB';
 const DB_STORE = 'media_assets';
 const DB_KEY_CUSTOM_VIDEO = 'custom_alert_video';
+const DB_KEY_CUSTOM_VIDEO_NAME = 'custom_alert_video_name';
 
 export class VideoAlertPlayer {
   constructor(options = {}) {
@@ -28,6 +29,7 @@ export class VideoAlertPlayer {
     this.defaultVideoSrc = 'assets/alert-video.mp4';
     this.currentObjectUrl = null;
     this.hasCustomVideo = false;
+    this.customVideoName = '';
 
     this.isPlaying = false;
     this.isAutoplayUnlocked = false;
@@ -39,7 +41,7 @@ export class VideoAlertPlayer {
     this.onErrorCallback = null;
 
     this._bindEvents();
-    this._loadPersistedVideo();
+    this.readyPromise = this._loadPersistedVideo();
   }
 
   _bindEvents() {
@@ -118,11 +120,12 @@ export class VideoAlertPlayer {
 
     this.currentObjectUrl = URL.createObjectURL(file);
     this.hasCustomVideo = true;
+    this.customVideoName = file.name;
     this.videoEl.src = this.currentObjectUrl;
     this.videoEl.load();
 
     // Persist to IndexedDB
-    await this._saveVideoToDB(file);
+    await this._saveVideoToDB(file, file.name);
   }
 
   /**
@@ -134,6 +137,7 @@ export class VideoAlertPlayer {
       this.currentObjectUrl = null;
     }
     this.hasCustomVideo = false;
+    this.customVideoName = '';
     this.videoEl.src = this.defaultVideoSrc;
     this.videoEl.load();
 
@@ -145,10 +149,11 @@ export class VideoAlertPlayer {
    */
   async _loadPersistedVideo() {
     try {
-      const blob = await this._getVideoFromDB();
-      if (blob) {
-        this.currentObjectUrl = URL.createObjectURL(blob);
+      const data = await this._getVideoFromDB();
+      if (data && data.blob) {
+        this.currentObjectUrl = URL.createObjectURL(data.blob);
         this.hasCustomVideo = true;
+        this.customVideoName = data.name || 'Custom Video';
         this.videoEl.src = this.currentObjectUrl;
       } else {
         this.videoEl.src = this.defaultVideoSrc;
@@ -322,13 +327,14 @@ export class VideoAlertPlayer {
     });
   }
 
-  async _saveVideoToDB(blob) {
+  async _saveVideoToDB(blob, name) {
     try {
       const db = await this._openDB();
       return new Promise((resolve, reject) => {
         const tx = db.transaction(DB_STORE, 'readwrite');
         const store = tx.objectStore(DB_STORE);
         store.put(blob, DB_KEY_CUSTOM_VIDEO);
+        if (name) store.put(name, DB_KEY_CUSTOM_VIDEO_NAME);
         tx.oncomplete = () => resolve();
         tx.onerror = () => reject(tx.error);
       });
@@ -340,12 +346,22 @@ export class VideoAlertPlayer {
   async _getVideoFromDB() {
     try {
       const db = await this._openDB();
-      return new Promise((resolve, reject) => {
+      return new Promise((resolve) => {
         const tx = db.transaction(DB_STORE, 'readonly');
         const store = tx.objectStore(DB_STORE);
-        const req = store.get(DB_KEY_CUSTOM_VIDEO);
-        req.onsuccess = () => resolve(req.result || null);
-        req.onerror = () => reject(req.error);
+        const reqBlob = store.get(DB_KEY_CUSTOM_VIDEO);
+        const reqName = store.get(DB_KEY_CUSTOM_VIDEO_NAME);
+        tx.oncomplete = () => {
+          if (reqBlob.result) {
+            resolve({
+              blob: reqBlob.result,
+              name: reqName.result || ''
+            });
+          } else {
+            resolve(null);
+          }
+        };
+        tx.onerror = () => resolve(null);
       });
     } catch {
       return null;
@@ -359,6 +375,7 @@ export class VideoAlertPlayer {
         const tx = db.transaction(DB_STORE, 'readwrite');
         const store = tx.objectStore(DB_STORE);
         store.delete(DB_KEY_CUSTOM_VIDEO);
+        store.delete(DB_KEY_CUSTOM_VIDEO_NAME);
         tx.oncomplete = () => resolve();
         tx.onerror = () => reject(tx.error);
       });

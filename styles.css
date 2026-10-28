@@ -75,7 +75,11 @@ html, body {
   flex-direction: column;
   max-width: 900px;
   margin: 0 auto;
-  padding: 12px 14px 40px;
+  /* Respect iPhone notch, Dynamic Island, status bar, and home indicator in standalone PWA mode */
+  padding-top: max(12px, calc(env(safe-area-inset-top, 0px) + 12px));
+  padding-right: max(14px, calc(env(safe-area-inset-right, 0px) + 14px));
+  padding-bottom: max(40px, calc(env(safe-area-inset-bottom, 0px) + 24px));
+  padding-left: max(14px, calc(env(safe-area-inset-left, 0px) + 14px));
   gap: 12px;
 }
 
@@ -120,7 +124,7 @@ html, body {
 /* In-View Quick Action Bar (Auto-hides after 4s, appears on tap) */
 .monitor-quick-bar {
   position: absolute;
-  bottom: max(28px, env(safe-area-inset-bottom));
+  bottom: max(28px, calc(env(safe-area-inset-bottom, 0px) + 16px));
   left: 50%;
   transform: translateX(-50%);
   display: flex;
@@ -209,8 +213,8 @@ html, body {
 
 .btn-skip-video {
   position: absolute;
-  top: max(16px, env(safe-area-inset-top));
-  right: max(16px, env(safe-area-inset-right));
+  top: max(16px, calc(env(safe-area-inset-top, 0px) + 12px));
+  right: max(16px, calc(env(safe-area-inset-right, 0px) + 12px));
   min-height: var(--min-touch-target);
   min-width: var(--min-touch-target);
   padding: 0 18px;
@@ -232,7 +236,7 @@ html, body {
 
 .btn-unmute-video {
   position: absolute;
-  bottom: max(32px, env(safe-area-inset-bottom));
+  bottom: max(32px, calc(env(safe-area-inset-bottom, 0px) + 16px));
   left: 50%;
   transform: translateX(-50%);
   min-height: var(--min-touch-target);
@@ -1107,7 +1111,7 @@ details[open] .summary-indicator {
 /* Toasts Container */
 .toast-container {
   position: fixed;
-  bottom: 20px;
+  bottom: max(20px, calc(env(safe-area-inset-bottom, 0px) + 16px));
   left: 50%;
   transform: translateX(-50%);
   z-index: 1000;
