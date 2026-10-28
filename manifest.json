@@ -1,0 +1,24 @@
+{
+  "name": "Ground Motion Detector",
+  "short_name": "MotionDetector",
+  "description": "On-device circular ground motion detector with audio and video alerts",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#090d16",
+  "theme_color": "#090d16",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192' fill='%23090d16'><rect width='192' height='192' rx='36' fill='%23090d16'/><circle cx='96' cy='96' r='60' stroke='%233b82f6' stroke-width='12' fill='none'/><circle cx='96' cy='96' r='24' stroke='%2310b981' stroke-width='8' fill='none'/></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512' fill='%23090d16'><rect width='512' height='512' rx='96' fill='%23090d16'/><circle cx='256' cy='256' r='160' stroke='%233b82f6' stroke-width='32' fill='none'/><circle cx='256' cy='256' r='64' stroke='%2310b981' stroke-width='20' fill='none'/></svg>",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
