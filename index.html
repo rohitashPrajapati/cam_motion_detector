@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <meta name="description" content="Monitor a selected ground area with circular motion detection and instant audio alerts on device.">
+  <meta name="description" content="Monitor a selected ground area with circular motion detection, fullscreen masking, and video alerts on device.">
   <meta name="theme-color" content="#090d16">
   <title>Ground Motion Detector</title>
   
@@ -14,9 +14,9 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="app-layout">
+  <div id="appLayout" class="app-layout">
     <!-- Top Header & App Bar -->
-    <header class="app-header">
+    <header id="appHeader" class="app-header">
       <div class="header-branding">
         <div class="logo-mark" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -27,7 +27,7 @@
         </div>
         <div>
           <h1 class="app-title">Ground Motion Detector</h1>
-          <p class="app-subtitle">Monitor a selected area and receive an audio alert when movement is detected.</p>
+          <p class="app-subtitle">Monitor a selected area and trigger video alerts when movement is detected.</p>
         </div>
       </div>
 
@@ -40,7 +40,7 @@
     </header>
 
     <!-- Steady Device / OS Stand Notice -->
-    <aside class="notice-bar" role="note">
+    <aside id="noticeBar" class="notice-bar" role="note">
       <span class="notice-icon" aria-hidden="true">ℹ️</span>
       <span class="notice-text">
         <strong>Stand required:</strong> Place your phone on a steady stand or tripod pointed at the ground. Hand-held use is not supported. Browsers cannot monitor with the screen off or when minimized.
@@ -73,7 +73,7 @@
         <!-- Simulated Ground Canvas for Demo Mode -->
         <canvas id="demoCanvas" class="demo-canvas hidden" aria-hidden="true"></canvas>
 
-        <!-- Interactive Vector / Canvas Overlay for Circular Detection Zone -->
+        <!-- Interactive Vector / Canvas Overlay for Mask & Circular Detection Zone -->
         <canvas id="overlayCanvas" class="overlay-canvas" aria-label="Interactive circular motion detection zone"></canvas>
 
         <!-- Fallback / Empty Placeholder when Camera is Off -->
@@ -101,6 +101,14 @@
           <span>Drag circle to position • Pinch to resize</span>
         </div>
 
+
+        <!-- Quick In-View Action Bar (Auto-hides after 4s) -->
+        <div id="monitorQuickBar" class="monitor-quick-bar hidden" role="toolbar" aria-label="Quick monitor actions">
+          <button id="btnQuickStop" class="btn btn-sm btn-quick" type="button">⏹ Stop</button>
+          <button id="btnQuickRecalibrate" class="btn btn-sm btn-quick" type="button">⚖️ Recalibrate</button>
+          <button id="btnQuickMute" class="btn btn-sm btn-quick" type="button">🔇 Mute</button>
+        </div>
+
         <!-- Debug Analytics HUD Overlay -->
         <div id="debugHud" class="debug-hud hidden" aria-live="off">
           <div class="debug-header">
@@ -121,7 +129,7 @@
     </main>
 
     <!-- Primary Control Panel -->
-    <section class="controls-panel" aria-label="Control settings">
+    <section id="controlsPanel" class="controls-panel" aria-label="Control settings">
       <!-- Quick Primary Actions Bar -->
       <div class="action-bar">
         <button id="btnToggleCamera" class="btn btn-primary" type="button" aria-pressed="false">
@@ -161,6 +169,64 @@
         </div>
       </div>
 
+      <!-- Feature 1: Outside Mask Appearance Settings -->
+      <div class="card control-card">
+        <div class="card-header">
+          <span class="card-title">Mask Outside Area (Fullscreen View)</span>
+          <button id="btnResetMask" class="btn btn-ghost btn-sm" type="button">Reset to Black</button>
+        </div>
+        <div class="mask-controls-grid">
+          <div class="color-picker-row">
+            <label for="maskColorPicker" class="control-label">Mask Color</label>
+            <div class="color-picker-wrap">
+              <input type="color" id="maskColorPicker" value="#000000" aria-label="Mask solid background color">
+              <span id="maskColorHex" class="val-tag">#000000</span>
+            </div>
+          </div>
+          <div class="slider-group">
+            <label for="maskOpacitySlider" class="control-label">
+              <span>Mask Opacity</span>
+              <span id="maskOpacityVal" class="val-tag">100%</span>
+            </label>
+            <input type="range" id="maskOpacitySlider" min="0" max="100" step="5" value="100" aria-label="Mask opacity percentage">
+          </div>
+        </div>
+      </div>
+
+      <!-- Feature 2: Motion Video Alert Settings -->
+      <div class="card control-card">
+        <div class="card-header">
+          <span class="card-title">Motion-Triggered Video Alert</span>
+          <button id="btnTestVideo" class="btn btn-ghost btn-sm" type="button">🎬 Test Video</button>
+        </div>
+        <div class="audio-controls-grid">
+          <div class="toggle-row">
+            <label class="toggle-label" for="videoOnMotionToggle">
+              <span>Play Video on Motion</span>
+              <small class="hint-text">Plays fullscreen video when motion triggers</small>
+            </label>
+            <input type="checkbox" id="videoOnMotionToggle" class="switch-checkbox" checked>
+          </div>
+
+          <div class="toggle-row">
+            <label class="toggle-label" for="videoAudioToggle">
+              <span>Play Video Audio</span>
+              <small class="hint-text">Unmutes video sound on playback</small>
+            </label>
+            <input type="checkbox" id="videoAudioToggle" class="switch-checkbox" checked>
+          </div>
+
+          <div class="file-picker-group">
+            <label for="videoFileInput" class="control-label">Custom Video Source</label>
+            <div class="file-picker-row">
+              <input type="file" id="videoFileInput" accept="video/*" class="file-input">
+              <button id="btnResetVideo" class="btn btn-ghost btn-sm" type="button" title="Restore default bundled video">Reset</button>
+            </div>
+            <small id="videoSourceLabel" class="field-help">Default: assets/alert-video.mp4 (H.264 MP4 recommended)</small>
+          </div>
+        </div>
+      </div>
+
       <!-- Sensitivity Presets Selection -->
       <div class="card control-card">
         <div class="card-header">
@@ -186,7 +252,7 @@
       <!-- Audio Alert Settings -->
       <div class="card control-card">
         <div class="card-header">
-          <span class="card-title">Audio & Notification</span>
+          <span class="card-title">Audio & Notification (Fallback / Standalone)</span>
           <button id="btnTestSound" class="btn btn-ghost btn-sm" type="button">
             <span>🔊 Test Sound</span>
           </button>
@@ -290,6 +356,17 @@
 
     <!-- Error & Notification Toast Container -->
     <div id="toastContainer" class="toast-container" aria-live="polite"></div>
+  </div>
+
+  <!-- Fullscreen Video Alert Overlay (Z-index above everything) -->
+  <div id="alertVideoOverlay" class="alert-video-overlay hidden" role="dialog" aria-modal="true" aria-label="Alert Video Player">
+    <video id="alertVideo" class="alert-video" playsinline webkit-playsinline preload="auto"></video>
+    <button id="btnSkipVideo" class="btn btn-skip-video hidden" type="button" aria-label="Skip video alert">
+      <span>Skip ✕</span>
+    </button>
+    <button id="btnUnmuteVideo" class="btn btn-unmute-video hidden" type="button" aria-label="Unmute video sound">
+      <span>🔊 Tap for Sound</span>
+    </button>
   </div>
 
   <!-- Offscreen Processing Canvas for Machine Vision (willReadFrequently: true) -->

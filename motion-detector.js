@@ -23,7 +23,8 @@ export const EngineState = {
   CANDIDATE: 'CANDIDATE',
   ALERTING: 'ALERTING',
   COOLDOWN: 'COOLDOWN',
-  SUPPRESSED: 'SUPPRESSED'
+  SUPPRESSED: 'SUPPRESSED',
+  RESUMING: 'RESUMING'
 };
 
 export const SENSITIVITY_PRESETS = {
@@ -182,11 +183,12 @@ export class MotionDetector {
   }
 
   /**
-   * Start calibration explicitly.
+   * Start calibration explicitly with optional frame count and state.
    */
-  startCalibration() {
+  startCalibration(totalFrames = 12, targetState = EngineState.CALIBRATING) {
     this.resetBackground();
-    this.state = EngineState.CALIBRATING;
+    this.calibrationTotalFrames = totalFrames;
+    this.state = targetState;
   }
 
   /**
@@ -313,7 +315,9 @@ export class MotionDetector {
 
     // 5. Calibration Phase
     if (!this.hasBackground || this.calibrationFrameCount < this.calibrationTotalFrames) {
-      this.state = EngineState.CALIBRATING;
+      if (this.state !== EngineState.RESUMING) {
+        this.state = EngineState.CALIBRATING;
+      }
       this._updateBackgroundCalibration(this.blurredGray, this.calibrationFrameCount);
       this.calibrationFrameCount++;
 
@@ -326,7 +330,7 @@ export class MotionDetector {
       }
 
       return {
-        state: EngineState.CALIBRATING,
+        state: this.state,
         hasMotion: false,
         alertTriggered: false,
         changedPercent: 0,

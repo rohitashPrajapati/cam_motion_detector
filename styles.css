@@ -2,6 +2,7 @@
  * styles.css
  * 
  * Dark Mode Theme with WCAG AA Contrast, Glassmorphism, and Ergonomic Mobile-First Layout.
+ * Supports Fullscreen Monitor View, Outside Masking, and Video Player Overlay.
  */
 
 :root {
@@ -78,7 +79,183 @@ html, body {
   gap: 12px;
 }
 
-/* Top Header */
+/* =========================================================================
+   Feature 1: Fullscreen Monitor View (Immersive Mode)
+   ========================================================================= */
+
+.app-layout.monitor-view-active {
+  position: fixed;
+  inset: 0;
+  width: 100dvw;
+  height: 100dvh;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  z-index: 100;
+  background: #000;
+  overflow: hidden;
+}
+
+.app-layout.monitor-view-active #appHeader,
+.app-layout.monitor-view-active #noticeBar,
+.app-layout.monitor-view-active #alertBanner,
+.app-layout.monitor-view-active #controlsPanel {
+  display: none !important;
+}
+
+.app-layout.monitor-view-active .viewport-wrapper {
+  width: 100%;
+  height: 100%;
+}
+
+.app-layout.monitor-view-active .video-container {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  aspect-ratio: unset;
+  border-radius: 0;
+  border: none;
+}
+
+/* In-View Quick Action Bar (Auto-hides after 4s, appears on tap) */
+.monitor-quick-bar {
+  position: absolute;
+  bottom: max(28px, env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 12px;
+  background: rgba(17, 24, 39, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: var(--radius-full);
+  padding: 8px 14px;
+  z-index: 115;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.7);
+  transition: opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1), transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  animation: slide-up 0.25s ease-out;
+}
+
+.monitor-quick-bar.hidden {
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 20px);
+}
+
+.btn-quick {
+  min-height: var(--min-touch-target);
+  background: var(--bg-interactive);
+  color: var(--text-primary);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius-full);
+  padding: 0 18px;
+  font-size: 0.84rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-quick:active {
+  transform: scale(0.95);
+  background: var(--bg-interactive-hover);
+}
+
+.btn-quick#btnQuickStop {
+  background: linear-gradient(135deg, #dc2626, #b91c1c);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.25);
+  box-shadow: 0 4px 12px rgba(220, 38, 38, 0.4);
+}
+
+.btn-quick#btnQuickStop:active {
+  background: linear-gradient(135deg, #b91c1c, #991b1b);
+}
+
+/* =========================================================================
+   Feature 2: Fullscreen Video Player Overlay
+   ========================================================================= */
+
+.alert-video-overlay {
+  position: fixed !important;
+  inset: 0 !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100vw !important;
+  width: 100dvw !important;
+  height: 100vh !important;
+  height: 100dvh !important;
+  background-color: #000000 !important;
+  z-index: 99999 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  overflow: hidden !important;
+}
+
+.alert-video-overlay.hidden {
+  display: none !important;
+}
+
+.alert-video {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  object-fit: contain !important;
+  display: block !important;
+  background-color: #000000 !important;
+}
+
+.btn-skip-video {
+  position: absolute;
+  top: max(16px, env(safe-area-inset-top));
+  right: max(16px, env(safe-area-inset-right));
+  min-height: var(--min-touch-target);
+  min-width: var(--min-touch-target);
+  padding: 0 18px;
+  border-radius: var(--radius-full);
+  background: rgba(17, 24, 39, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  color: #fff;
+  z-index: 210;
+  font-weight: 700;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+}
+
+.btn-skip-video.hidden {
+  display: none !important;
+}
+
+.btn-unmute-video {
+  position: absolute;
+  bottom: max(32px, env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  min-height: var(--min-touch-target);
+  padding: 0 22px;
+  border-radius: var(--radius-full);
+  background: rgba(37, 99, 235, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #fff;
+  z-index: 210;
+  font-weight: 700;
+  box-shadow: 0 4px 18px rgba(37, 99, 235, 0.5);
+  cursor: pointer;
+  animation: pulse-slow 1.5s infinite ease-in-out;
+}
+
+.btn-unmute-video.hidden {
+  display: none !important;
+}
+
+/* =========================================================================
+   Standard Layout, Badges & Header
+   ========================================================================= */
+
 .app-header {
   display: flex;
   align-items: center;
@@ -153,12 +330,17 @@ html, body {
 .status-off .status-dot { background-color: var(--text-muted); }
 .status-off { border-color: rgba(156, 163, 175, 0.2); }
 
-.status-calibrating .status-dot {
+.status-calibrating .status-dot,
+.status-resuming .status-dot {
   background-color: var(--accent-amber);
   box-shadow: 0 0 8px var(--accent-amber);
   animation: pulse-slow 1.2s infinite ease-in-out;
 }
-.status-calibrating { border-color: var(--accent-amber); color: #fde68a; }
+.status-calibrating,
+.status-resuming { 
+  border-color: var(--accent-amber); 
+  color: #fde68a; 
+}
 
 .status-monitoring .status-dot {
   background-color: var(--accent-emerald);
@@ -167,12 +349,14 @@ html, body {
 }
 .status-monitoring { border-color: var(--accent-emerald); color: #a7f3d0; }
 
-.status-alert .status-dot {
+.status-alert .status-dot,
+.status-video .status-dot {
   background-color: var(--accent-crimson);
   box-shadow: 0 0 12px var(--accent-crimson);
   animation: blink-rapid 0.4s infinite ease-in-out;
 }
-.status-alert {
+.status-alert,
+.status-video {
   border-color: var(--accent-crimson);
   color: #fecaca;
   background: rgba(239, 68, 68, 0.15);
@@ -285,7 +469,7 @@ html, body {
   object-fit: contain;
 }
 
-/* Overlay Canvas for Circular Detection Zone */
+/* Overlay Canvas for Circular Detection Zone and Outside Masking */
 .overlay-canvas {
   position: absolute;
   top: 0;
@@ -293,7 +477,7 @@ html, body {
   width: 100%;
   height: 100%;
   pointer-events: auto;
-  touch-action: none; /* Crucial for custom pointer drag & pinch */
+  touch-action: none;
   cursor: grab;
   z-index: 5;
 }
@@ -611,6 +795,81 @@ html, body {
   display: none;
 }
 
+/* Mask Settings */
+.mask-controls-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.color-picker-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.color-picker-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+input[type="color"] {
+  -webkit-appearance: none;
+  border: 1px solid var(--bg-card-border);
+  border-radius: var(--radius-sm);
+  width: 40px;
+  height: 34px;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+}
+
+input[type="color"]::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+input[type="color"]::-webkit-color-swatch {
+  border: none;
+  border-radius: 6px;
+}
+
+/* Video Alert Settings */
+.file-picker-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.file-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.file-input {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  background: var(--bg-interactive);
+  border: 1px solid var(--bg-card-border);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  flex: 1;
+}
+
+.file-input::file-selector-button {
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 4px 10px;
+  margin-right: 8px;
+  font-family: var(--font-sans);
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
 /* Preset Buttons */
 .preset-buttons {
   display: grid;
@@ -908,6 +1167,11 @@ details[open] .summary-indicator {
 @keyframes slide-down {
   from { opacity: 0; transform: translateY(-8px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slide-up {
+  from { opacity: 0; transform: translate(-50%, 16px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
 }
 
 @keyframes toast-in {

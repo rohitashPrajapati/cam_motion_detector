@@ -2,11 +2,13 @@
  * app.js
  * 
  * Main Application Controller for Ground Motion Detector.
- * Manages Camera Lifecycle, Coordinate Mapping, Detection Loop, UI State, and Demo Mode.
+ * Manages Camera Lifecycle, Coordinate Mapping, Detection Loop, Fullscreen Monitor View,
+ * Outside Area Masking, Video Player Integration, and Demo Mode.
  */
 
 import { MotionDetector, EngineState, SENSITIVITY_PRESETS } from './motion-detector.js';
 import { AudioAlert } from './audio-alert.js';
+import { VideoAlertPlayer } from './video-player.js';
 
 // Application State
 const state = {
@@ -14,12 +16,22 @@ const state = {
   isMonitoring: false,
   isPaused: false,
   isDemoMode: false,
+  isMonitorView: false,
   stream: null,
   activeDeviceId: null,
   availableVideoDevices: [],
   wakeLock: null,
   debugEnabled: false,
   sampleIntervalMs: 150,
+
+  // Feature 1: Outside Mask Configuration
+  maskColor: '#000000',
+  maskOpacity: 1.0, // 0.0 to 1.0
+
+  // Feature 2: Video Alert Configuration
+  isVideoOnMotion: true,
+  isVideoAudio: true,
+  isVideoPlaying: false,
 
   // Zone coordinates: NORMALIZED (0.0 to 1.0) relative to intrinsic video dimensions
   // r is normalized to Math.min(videoWidth, videoHeight)
@@ -44,15 +56,25 @@ const state = {
   activePointers: new Map(),
   dragStartZone: null,
   initialPinchDist: 0,
-  initialPinchRadius: 0
+  initialPinchRadius: 0,
+
+  // Monitor view quick bar auto-hide timer
+  quickBarTimer: null
 };
 
 // Sub-modules
 const detector = new MotionDetector();
 const audioAlert = new AudioAlert();
+let videoPlayer = null;
 
 // DOM Element References
 const dom = {
+  // Layout Root
+  appLayout: document.getElementById('appLayout'),
+  appHeader: document.getElementById('appHeader'),
+  noticeBar: document.getElementById('noticeBar'),
+  controlsPanel: document.getElementById('controlsPanel'),
+
   // Video and Canvases
   cameraFeed: document.getElementById('cameraFeed'),
   demoCanvas: document.getElementById('demoCanvas'),
@@ -60,6 +82,18 @@ const dom = {
   videoContainer: document.getElementById('videoContainer'),
   emptyCameraState: document.getElementById('emptyCameraState'),
   zoneHelperPill: document.getElementById('zoneHelperPill'),
+
+  // Monitor View Minimal In-View UI (Toggled on tap)
+  monitorQuickBar: document.getElementById('monitorQuickBar'),
+  btnQuickStop: document.getElementById('btnQuickStop'),
+  btnQuickRecalibrate: document.getElementById('btnQuickRecalibrate'),
+  btnQuickMute: document.getElementById('btnQuickMute'),
+
+  // Video Player Elements
+  alertVideoOverlay: document.getElementById('alertVideoOverlay'),
+  alertVideo: document.getElementById('alertVideo'),
+  btnSkipVideo: document.getElementById('btnSkipVideo'),
+  btnUnmuteVideo: document.getElementById('btnUnmuteVideo'),
 
   // Processing Canvases (Offscreen)
   processingCanvas: document.getElementById('processingCanvas'),
@@ -81,7 +115,7 @@ const dom = {
   alertBanner: document.getElementById('alertBanner'),
   alertTimestamp: document.getElementById('alertTimestamp'),
 
-  // Primary Buttons
+  // Primary Action Buttons
   btnToggleCamera: document.getElementById('btnToggleCamera'),
   labelToggleCamera: document.getElementById('labelToggleCamera'),
   btnToggleMonitoring: document.getElementById('btnToggleMonitoring'),
@@ -97,6 +131,21 @@ const dom = {
   btnResetZone: document.getElementById('btnResetZone'),
   circleRadiusSlider: document.getElementById('circleRadiusSlider'),
   circleRadiusVal: document.getElementById('circleRadiusVal'),
+
+  // Feature 1: Mask Controls
+  maskColorPicker: document.getElementById('maskColorPicker'),
+  maskColorHex: document.getElementById('maskColorHex'),
+  maskOpacitySlider: document.getElementById('maskOpacitySlider'),
+  maskOpacityVal: document.getElementById('maskOpacityVal'),
+  btnResetMask: document.getElementById('btnResetMask'),
+
+  // Feature 2: Video Alert Settings
+  videoOnMotionToggle: document.getElementById('videoOnMotionToggle'),
+  videoAudioToggle: document.getElementById('videoAudioToggle'),
+  videoFileInput: document.getElementById('videoFileInput'),
+  btnResetVideo: document.getElementById('btnResetVideo'),
+  videoSourceLabel: document.getElementById('videoSourceLabel'),
+  btnTestVideo: document.getElementById('btnTestVideo'),
 
   // Preset Controls
   presetButtons: {
@@ -153,19 +202,12 @@ let demoAnim = {
 };
 
 /* =========================================================================
-   1. Coordinate Mapping & Transformation Logic
+   1. Coordinate Mapping & Visual Masking Pipeline
    ========================================================================= */
 
 /**
  * Calculates the exact rendered video rectangle inside the container,
  * accounting for `object-fit: contain` letterboxing / pillarboxing.
- * 
- * Why `contain`?
- * Because `cover` crops portions of the camera view outside the screen, causing
- * blind spots where motion is ignored or triggering unseen alerts. `contain` ensures
- * 100% of the camera sensor frame is visible and geometrically aligned with detection.
- * 
- * @returns {Object} { left, top, width, height, scaleX, scaleY }
  */
 function getVideoRenderRect() {
   const containerW = dom.videoContainer.clientWidth;
@@ -182,8 +224,8 @@ function getVideoRenderRect() {
     intrinsicH = dom.cameraFeed.videoHeight;
   }
 
-  const containerAspect = containerW / containerH;
-  const videoAspect = intrinsicW / intrinsicH;
+  const containerAspect = containerW / (containerH || 1);
+  const videoAspect = intrinsicW / (intrinsicH || 1);
 
   let renderW, renderH, offsetX, offsetY;
 
@@ -237,7 +279,6 @@ function resizeOverlayCanvas() {
  */
 function clampZoneCoordinates() {
   const rect = getVideoRenderRect();
-  // r is normalized relative to min dimension
   const minDim = Math.min(rect.intrinsicW, rect.intrinsicH);
   const rPixels = state.zone.r * minDim;
 
@@ -258,7 +299,23 @@ function clampZoneCoordinates() {
 }
 
 /**
- * Render the interactive circular zone overlay on the canvas.
+ * Convert Hex Color and Opacity to CSS RGBA string.
+ */
+function hexToRgba(hex, opacity) {
+  let cleanHex = hex.replace('#', '');
+  if (cleanHex.length === 3) {
+    cleanHex = cleanHex.split('').map((c) => c + c).join('');
+  }
+  const num = parseInt(cleanHex, 16);
+  const r = (num >> 16) & 255;
+  const g = (num >> 8) & 255;
+  const b = num & 255;
+  return `rgba(${r}, ${g}, ${b}, ${opacity})`;
+}
+
+/**
+ * Render the interactive circular zone overlay AND Feature 1 Outside Area Mask.
+ * Uses canvas even-odd fill rule to cut out the circle interior cleanly.
  */
 function drawOverlay(engineStatus = detector.state, changedPercent = 0) {
   const rect = getVideoRenderRect();
@@ -279,18 +336,33 @@ function drawOverlay(engineStatus = detector.state, changedPercent = 0) {
   const screenCy = rect.top + state.zone.cy * rect.height;
   const screenR = state.zone.r * rect.minDim;
 
+  // -------------------------------------------------------------
+  // Feature 1: Solid Outside Masking with transparent circle hole
+  // -------------------------------------------------------------
+  if (state.maskOpacity > 0) {
+    overlayCtx.save();
+    overlayCtx.beginPath();
+    // Outer canvas boundary
+    overlayCtx.rect(0, 0, rect.containerW, rect.containerH);
+    // Inner circular hole cutout (counter-clockwise)
+    overlayCtx.arc(screenCx, screenCy, Math.max(0, screenR), 0, Math.PI * 2, true);
+    overlayCtx.fillStyle = hexToRgba(state.maskColor, state.maskOpacity);
+    overlayCtx.fill('evenodd');
+    overlayCtx.restore();
+  }
+
   // Determine stroke color and theme based on engine state
   let strokeColor = '#06b6d4'; // Cyan default (Idle)
   let fillColor = 'rgba(6, 182, 212, 0.04)';
   let glowColor = 'rgba(6, 182, 212, 0.3)';
 
   if (state.isMonitoring) {
-    if (engineStatus === EngineState.ALERTING) {
-      strokeColor = '#ef4444'; // Crimson (Motion Detected)
+    if (engineStatus === EngineState.ALERTING || state.isVideoPlaying) {
+      strokeColor = '#ef4444'; // Crimson (Motion Detected / Video Playing)
       fillColor = 'rgba(239, 68, 68, 0.22)';
       glowColor = 'rgba(239, 68, 68, 0.7)';
-    } else if (engineStatus === EngineState.CALIBRATING) {
-      strokeColor = '#f59e0b'; // Amber (Calibrating)
+    } else if (engineStatus === EngineState.CALIBRATING || engineStatus === EngineState.RESUMING) {
+      strokeColor = '#f59e0b'; // Amber (Calibrating / Resuming)
       fillColor = 'rgba(245, 158, 11, 0.08)';
       glowColor = 'rgba(245, 158, 11, 0.4)';
     } else if (engineStatus === EngineState.SUPPRESSED) {
@@ -304,19 +376,8 @@ function drawOverlay(engineStatus = detector.state, changedPercent = 0) {
     }
   }
 
-  // Draw Letterbox Dimming outside active video rect
-  overlayCtx.fillStyle = 'rgba(0, 0, 0, 0.4)';
-  if (rect.left > 0) {
-    overlayCtx.fillRect(0, 0, rect.left, rect.containerH);
-    overlayCtx.fillRect(rect.left + rect.width, 0, rect.left, rect.containerH);
-  }
-  if (rect.top > 0) {
-    overlayCtx.fillRect(0, 0, rect.containerW, rect.top);
-    overlayCtx.fillRect(0, rect.top + rect.height, rect.containerW, rect.top);
-  }
-
   // 1. Outer Glow / Ripple if alerting
-  if (engineStatus === EngineState.ALERTING) {
+  if (engineStatus === EngineState.ALERTING || state.isVideoPlaying) {
     const pulseRadius = screenR + Math.sin(performance.now() * 0.01) * 6;
     overlayCtx.beginPath();
     overlayCtx.arc(screenCx, screenCy, Math.max(1, pulseRadius), 0, Math.PI * 2);
@@ -332,11 +393,11 @@ function drawOverlay(engineStatus = detector.state, changedPercent = 0) {
   overlayCtx.fill();
 
   overlayCtx.shadowColor = glowColor;
-  overlayCtx.shadowBlur = engineStatus === EngineState.ALERTING ? 20 : 10;
+  overlayCtx.shadowBlur = (engineStatus === EngineState.ALERTING || state.isVideoPlaying) ? 20 : 10;
   overlayCtx.strokeStyle = strokeColor;
   overlayCtx.lineWidth = 2.5;
 
-  if (engineStatus === EngineState.CALIBRATING) {
+  if (engineStatus === EngineState.CALIBRATING || engineStatus === EngineState.RESUMING) {
     overlayCtx.setLineDash([8, 6]);
     overlayCtx.lineDashOffset = -performance.now() * 0.02;
   } else {
@@ -345,56 +406,62 @@ function drawOverlay(engineStatus = detector.state, changedPercent = 0) {
   overlayCtx.stroke();
   overlayCtx.shadowBlur = 0; // Reset shadow
 
-  // 3. Center Crosshair Anchor
-  overlayCtx.beginPath();
-  const chLen = 7;
-  overlayCtx.moveTo(screenCx - chLen, screenCy);
-  overlayCtx.lineTo(screenCx + chLen, screenCy);
-  overlayCtx.moveTo(screenCx, screenCy - chLen);
-  overlayCtx.lineTo(screenCx, screenCy + chLen);
-  overlayCtx.strokeStyle = strokeColor;
-  overlayCtx.lineWidth = 1.5;
-  overlayCtx.setLineDash([]);
-  overlayCtx.stroke();
+  // 3. Center Crosshair Anchor (Only visible in normal setup view, hidden in monitor view for immersion)
+  if (!state.isMonitorView) {
+    overlayCtx.beginPath();
+    const chLen = 7;
+    overlayCtx.moveTo(screenCx - chLen, screenCy);
+    overlayCtx.lineTo(screenCx + chLen, screenCy);
+    overlayCtx.moveTo(screenCx, screenCy - chLen);
+    overlayCtx.lineTo(screenCx, screenCy + chLen);
+    overlayCtx.strokeStyle = strokeColor;
+    overlayCtx.lineWidth = 1.5;
+    overlayCtx.setLineDash([]);
+    overlayCtx.stroke();
 
-  // 4. Radius Resize Handle at Right Edge (3 o'clock)
-  const handleX = screenCx + screenR;
-  const handleY = screenCy;
-  overlayCtx.beginPath();
-  overlayCtx.arc(handleX, handleY, 6, 0, Math.PI * 2);
-  overlayCtx.fillStyle = '#ffffff';
-  overlayCtx.fill();
-  overlayCtx.strokeStyle = strokeColor;
-  overlayCtx.lineWidth = 2;
-  overlayCtx.stroke();
-
-  // 5. Zone Label Pill
-  let labelText = 'ZONE';
-  if (engineStatus === EngineState.CALIBRATING) {
-    labelText = 'CALIBRATING...';
-  } else if (engineStatus === EngineState.ALERTING) {
-    labelText = `MOTION! ${changedPercent.toFixed(1)}%`;
-  } else if (engineStatus === EngineState.SUPPRESSED) {
-    labelText = 'STABILIZING...';
+    // 4. Radius Resize Handle at Right Edge (3 o'clock)
+    const handleX = screenCx + screenR;
+    const handleY = screenCy;
+    overlayCtx.beginPath();
+    overlayCtx.arc(handleX, handleY, 6, 0, Math.PI * 2);
+    overlayCtx.fillStyle = '#ffffff';
+    overlayCtx.fill();
+    overlayCtx.strokeStyle = strokeColor;
+    overlayCtx.lineWidth = 2;
+    overlayCtx.stroke();
   }
 
-  overlayCtx.font = '600 11px var(--font-sans)';
-  const textWidth = overlayCtx.measureText(labelText).width;
-  const badgeW = textWidth + 16;
-  const badgeH = 20;
-  const badgeY = screenCy - screenR - badgeH - 6;
+  // 5. Zone Label Pill (In normal view)
+  if (!state.isMonitorView) {
+    let labelText = 'ZONE';
+    if (engineStatus === EngineState.CALIBRATING) {
+      labelText = 'CALIBRATING...';
+    } else if (engineStatus === EngineState.RESUMING) {
+      labelText = 'RESUMING...';
+    } else if (engineStatus === EngineState.ALERTING || state.isVideoPlaying) {
+      labelText = `MOTION! ${changedPercent.toFixed(1)}%`;
+    } else if (engineStatus === EngineState.SUPPRESSED) {
+      labelText = 'STABILIZING...';
+    }
 
-  overlayCtx.fillStyle = 'rgba(9, 13, 22, 0.85)';
-  overlayCtx.strokeStyle = strokeColor;
-  overlayCtx.lineWidth = 1;
-  _drawRoundedRect(overlayCtx, screenCx - badgeW / 2, badgeY, badgeW, badgeH, 10);
-  overlayCtx.fill();
-  overlayCtx.stroke();
+    overlayCtx.font = '600 11px var(--font-sans)';
+    const textWidth = overlayCtx.measureText(labelText).width;
+    const badgeW = textWidth + 16;
+    const badgeH = 20;
+    const badgeY = screenCy - screenR - badgeH - 6;
 
-  overlayCtx.fillStyle = strokeColor;
-  overlayCtx.textAlign = 'center';
-  overlayCtx.textBaseline = 'middle';
-  overlayCtx.fillText(labelText, screenCx, badgeY + badgeH / 2);
+    overlayCtx.fillStyle = 'rgba(9, 13, 22, 0.85)';
+    overlayCtx.strokeStyle = strokeColor;
+    overlayCtx.lineWidth = 1;
+    _drawRoundedRect(overlayCtx, screenCx - badgeW / 2, badgeY, badgeW, badgeH, 10);
+    overlayCtx.fill();
+    overlayCtx.stroke();
+
+    overlayCtx.fillStyle = strokeColor;
+    overlayCtx.textAlign = 'center';
+    overlayCtx.textBaseline = 'middle';
+    overlayCtx.fillText(labelText, screenCx, badgeY + badgeH / 2);
+  }
 
   overlayCtx.restore();
 }
@@ -414,13 +481,19 @@ function _drawRoundedRect(ctx, x, y, w, h, r) {
 }
 
 /* =========================================================================
-   2. Pointer & Touch Interactions (Drag + Pinch)
+   2. Pointer & Touch Interactions
    ========================================================================= */
 
 function setupPointerInteractions() {
   const canvas = dom.overlayCanvas;
 
   canvas.addEventListener('pointerdown', (e) => {
+    // If in monitor view: tapping toggles the quick action bar (Stop, Recalibrate, Mute)
+    if (state.isMonitorView) {
+      toggleMonitorQuickBar();
+      return;
+    }
+
     canvas.setPointerCapture(e.pointerId);
     state.activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
@@ -433,7 +506,6 @@ function setupPointerInteractions() {
     const screenCy = rect.top + state.zone.cy * rect.height;
     const screenR = state.zone.r * rect.minDim;
 
-    // Check if dragging near circle or resizing near edge
     const distToCenter = Math.hypot(clickX - screenCx, clickY - screenCy);
     const isNearHandle = Math.hypot(clickX - (screenCx + screenR), clickY - screenCy) < 24;
 
@@ -443,7 +515,6 @@ function setupPointerInteractions() {
       state.dragStartCoord = { x: clickX, y: clickY };
       state.isResizing = isNearHandle;
     } else if (state.activePointers.size === 2) {
-      // 2-finger pinch initiated
       const pts = Array.from(state.activePointers.values());
       state.initialPinchDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
       state.initialPinchRadius = state.zone.r;
@@ -451,6 +522,7 @@ function setupPointerInteractions() {
   });
 
   canvas.addEventListener('pointermove', (e) => {
+    if (state.isMonitorView) return; // Disabled while in monitor view
     if (!state.activePointers.has(e.pointerId)) return;
     state.activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
@@ -458,7 +530,6 @@ function setupPointerInteractions() {
     const canvasBounds = canvas.getBoundingClientRect();
 
     if (state.activePointers.size === 2) {
-      // 2-finger pinch zoom
       const pts = Array.from(state.activePointers.values());
       const currentDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
       if (state.initialPinchDist > 0) {
@@ -489,7 +560,6 @@ function setupPointerInteractions() {
       const deltaX = currentX - state.dragStartCoord.x;
       const deltaY = currentY - state.dragStartCoord.y;
 
-      // Convert delta screen pixels to normalized coordinates
       state.zone.cx = state.dragStartZone.cx + (deltaX / rect.width);
       state.zone.cy = state.dragStartZone.cy + (deltaY / rect.height);
 
@@ -522,7 +592,7 @@ function setupPointerInteractions() {
   canvas.addEventListener('pointerup', onPointerUp);
   canvas.addEventListener('pointercancel', onPointerUp);
 
-  // Resize slider binding
+  // Radius slider
   dom.circleRadiusSlider.addEventListener('input', (e) => {
     state.zone.r = Number(e.target.value) / 100;
     clampZoneCoordinates();
@@ -531,14 +601,90 @@ function setupPointerInteractions() {
   });
 }
 
+function toggleMonitorQuickBar() {
+  if (!state.isMonitorView) return;
+  dom.monitorQuickBar.classList.remove('hidden');
+
+  if (state.quickBarTimer) clearTimeout(state.quickBarTimer);
+  state.quickBarTimer = setTimeout(() => {
+    dom.monitorQuickBar.classList.add('hidden');
+  }, 4000);
+}
+
 /* =========================================================================
-   3. Camera Lifecycle & Fallback Chain
+   3. Fullscreen & Monitor View Transition
    ========================================================================= */
 
 /**
- * Start Camera using getUserMedia fallback chain.
- * Target: Rear camera on mobile, fallback to any available camera.
+ * Enter Fullscreen Monitor View (after calibration succeeds).
+ * Uses Fullscreen API where supported; falls back to CSS fullscreen (e.g. iPhone Safari).
  */
+async function enterMonitorView() {
+  state.isMonitorView = true;
+  dom.appLayout.classList.add('monitor-view-active');
+  dom.zoneHelperPill.classList.add('hidden');
+
+  // Attempt HTML5 Fullscreen API (fail gracefully on iOS Safari)
+  if (document.fullscreenEnabled || document.webkitFullscreenEnabled) {
+    try {
+      if (dom.videoContainer.requestFullscreen) {
+        await dom.videoContainer.requestFullscreen();
+      } else if (dom.videoContainer.webkitRequestFullscreen) {
+        await dom.videoContainer.webkitRequestFullscreen();
+      }
+    } catch {
+      // Rejections are expected on iOS Safari or when permission not given; CSS fullscreen covers it
+    }
+  }
+
+  await acquireWakeLock();
+  resizeOverlayCanvas();
+  drawOverlay();
+}
+
+/**
+ * Exit Fullscreen Monitor View and restore standard controls UI.
+ */
+async function exitMonitorView() {
+  state.isMonitorView = false;
+  dom.appLayout.classList.remove('monitor-view-active');
+  dom.monitorQuickBar.classList.add('hidden');
+
+  if (state.quickBarTimer) clearTimeout(state.quickBarTimer);
+
+  if (document.fullscreenElement || document.webkitFullscreenElement) {
+    try {
+      if (document.exitFullscreen) {
+        await document.exitFullscreen();
+      } else if (document.webkitExitFullscreen) {
+        await document.webkitExitFullscreen();
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  resizeOverlayCanvas();
+  drawOverlay();
+}
+
+// Fullscreen change listener (handle Esc key or system gesture)
+function handleFullscreenChange() {
+  const isDocFullscreen = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
+  if (!isDocFullscreen && state.isMonitorView) {
+    // If user pressed Esc, restore standard controls while keeping monitoring active
+    exitMonitorView();
+    showToast('Exited fullscreen view. Monitoring continues in standard view.', 'info');
+  }
+}
+
+document.addEventListener('fullscreenchange', handleFullscreenChange);
+document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+
+/* =========================================================================
+   4. Camera Lifecycle & Fallback Chain
+   ========================================================================= */
+
 async function startCamera() {
   if (state.isDemoMode) {
     stopDemoMode();
@@ -547,7 +693,6 @@ async function startCamera() {
   showToast('Initializing camera...', 'info');
 
   const constraintsList = [
-    // 1. Ideal Rear Camera at 720p/1080p
     {
       video: {
         facingMode: { ideal: 'environment' },
@@ -556,14 +701,12 @@ async function startCamera() {
       },
       audio: false
     },
-    // 2. Exact or fallback environment facing mode
     {
       video: {
         facingMode: 'environment'
       },
       audio: false
     },
-    // 3. Fallback to any camera available
     {
       video: true,
       audio: false
@@ -601,7 +744,6 @@ async function startCamera() {
   dom.emptyCameraState.classList.add('hidden');
   dom.zoneHelperPill.classList.remove('hidden');
 
-  // Attempt continuous exposure/focus constraints (silently ignore if unsupported)
   const track = stream.getVideoTracks()[0];
   if (track && track.applyConstraints) {
     try {
@@ -616,12 +758,10 @@ async function startCamera() {
     }
   }
 
-  // Interruption listeners
   track.addEventListener('ended', onStreamEnded);
   track.addEventListener('mute', onStreamMuted);
   track.addEventListener('unmute', onStreamUnmuted);
 
-  // Update UI and re-enumerate devices to detect multi-camera setup
   updateUI();
   await enumerateCameras();
   resizeOverlayCanvas();
@@ -631,9 +771,6 @@ async function startCamera() {
   return true;
 }
 
-/**
- * Stop Camera and release all media hardware tracks.
- */
 function stopCamera() {
   if (state.isMonitoring) {
     stopMonitoring();
@@ -657,13 +794,11 @@ function stopCamera() {
   dom.zoneHelperPill.classList.add('hidden');
   dom.alertBanner.classList.add('hidden');
 
+  exitMonitorView();
   updateUI();
   drawOverlay();
 }
 
-/**
- * Human-readable camera error resolution.
- */
 function handleCameraError(err) {
   let message = 'Unable to access the camera.';
 
@@ -684,9 +819,6 @@ function handleCameraError(err) {
   showToast(message, 'error', 6000);
 }
 
-/**
- * Enumerate connected video devices to show Camera Switch button if >1 camera exists.
- */
 async function enumerateCameras() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
 
@@ -704,9 +836,6 @@ async function enumerateCameras() {
   }
 }
 
-/**
- * Switch camera lens (cycle available video devices).
- */
 async function switchCamera() {
   if (state.availableVideoDevices.length <= 1) return;
 
@@ -742,7 +871,7 @@ async function switchCamera() {
 }
 
 /* =========================================================================
-   4. Screen Wake Lock & Tab Interruption Handling
+   5. Screen Wake Lock & Tab Interruption Handling
    ========================================================================= */
 
 async function acquireWakeLock() {
@@ -753,7 +882,7 @@ async function acquireWakeLock() {
         state.wakeLock = null;
       });
     } catch {
-      // Wake locks can be rejected on low battery or background
+      // Ignored
     }
   }
 }
@@ -769,14 +898,16 @@ function releaseWakeLock() {
   }
 }
 
-// Background / Visibility change listeners
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
+    if (state.isVideoPlaying && videoPlayer) {
+      videoPlayer.stop();
+      state.isVideoPlaying = false;
+    }
     if (state.isMonitoring) {
       pauseMonitoring('Interrupted: Tab minimized or screen locked');
     }
   } else {
-    // Tab resumed
     if (state.isMonitoring && state.isPaused) {
       resumeMonitoring();
     }
@@ -784,6 +915,10 @@ document.addEventListener('visibilitychange', () => {
 });
 
 function onStreamEnded() {
+  if (state.isVideoPlaying && videoPlayer) {
+    videoPlayer.stop();
+    state.isVideoPlaying = false;
+  }
   pauseMonitoring('Camera feed was terminated');
 }
 
@@ -806,17 +941,18 @@ function pauseMonitoring(reason) {
 function resumeMonitoring() {
   state.isPaused = false;
   acquireWakeLock();
-  detector.startCalibration();
+  detector.startCalibration(8, EngineState.RESUMING);
   updateUI();
   showToast('Monitoring resumed. Recalibrating background...', 'info');
 }
 
 /* =========================================================================
-   5. Vision Loop & Controlled Sampling Pipeline
+   6. Vision Loop & Video Alert Coordination
    ========================================================================= */
 
 /**
  * Start Monitoring loop.
+ * Unlocks AudioContext AND Video Player Autoplay in this user tap!
  */
 async function startMonitoring() {
   if (!state.isCameraActive && !state.isDemoMode) {
@@ -824,13 +960,15 @@ async function startMonitoring() {
     return;
   }
 
-  // Ensure AudioContext is warm from this user click
+  // 1. Critical Autoplay Unlock during user click
   await audioAlert.ensureAudioContext();
+  if (videoPlayer) {
+    await videoPlayer.unlockAutoplay();
+  }
 
   state.isMonitoring = true;
   state.isPaused = false;
 
-  // Attempt to lock exposure/focus to manual on supported devices
   const track = state.stream?.getVideoTracks()[0];
   if (track && track.applyConstraints) {
     try {
@@ -846,20 +984,26 @@ async function startMonitoring() {
   }
 
   await acquireWakeLock();
-  detector.startCalibration();
+  detector.startCalibration(12, EngineState.CALIBRATING);
   updateUI();
 
-  showToast('Calibrating background (~2s). Keep device still...', 'info');
+  showToast('Calibrating background (~2s). Keep device steady...', 'info');
 
   scheduleNextFrame();
 }
 
 /**
- * Stop Monitoring loop.
+ * Stop Monitoring loop. Restores normal view and releases all states.
  */
 function stopMonitoring() {
   state.isMonitoring = false;
   state.isPaused = false;
+  state.isVideoPlaying = false;
+
+  if (videoPlayer) {
+    videoPlayer.stop();
+  }
+
   releaseWakeLock();
 
   if (state.rvfcHandle && dom.cameraFeed.cancelVideoFrameCallback) {
@@ -873,19 +1017,18 @@ function stopMonitoring() {
 
   detector.resetBackground();
   dom.alertBanner.classList.add('hidden');
+
+  exitMonitorView();
   updateUI();
   drawOverlay();
 }
 
-/**
- * Schedules the next vision frame using requestVideoFrameCallback where supported,
- * falling back to requestAnimationFrame throttled to sampleIntervalMs.
- */
 function scheduleNextFrame() {
   if (!state.isMonitoring && !state.isDemoMode) return;
+  if (state.isVideoPlaying) return; // Analysis paused while video plays
 
   if (state.isCameraActive && 'requestVideoFrameCallback' in dom.cameraFeed) {
-    state.rvfcHandle = dom.cameraFeed.requestVideoFrameCallback((now, metadata) => {
+    state.rvfcHandle = dom.cameraFeed.requestVideoFrameCallback((now) => {
       onVideoFrame(now);
     });
   } else {
@@ -896,10 +1039,11 @@ function scheduleNextFrame() {
 }
 
 /**
- * Video frame evaluation cycle.
+ * Vision evaluation cycle.
  */
 function onVideoFrame(now) {
-  // Check throttle interval
+  if (state.isVideoPlaying) return;
+
   const delta = now - state.lastProcessTimestamp;
   if (delta < state.sampleIntervalMs) {
     scheduleNextFrame();
@@ -927,17 +1071,20 @@ function onVideoFrame(now) {
   const sourceElement = state.isDemoMode ? dom.demoCanvas : dom.cameraFeed;
   const metrics = processFrame(sourceElement, now);
 
-  // Redraw overlay with status
+  // Redraw overlay with status & mask
   drawOverlay(metrics.state, metrics.changedPercent);
 
-  // Handle alert trigger
+  // Auto-switch to Monitor View when calibration finishes!
+  if (metrics.state === EngineState.MONITORING && !state.isMonitorView && state.isMonitoring) {
+    enterMonitorView();
+  }
+
+  // Handle Motion Alert
   if (metrics.alertTriggered) {
     onMotionAlert(metrics);
-  } else if (metrics.state === EngineState.ALERTING) {
-    // Keep banner visible while in motion
+  } else if (metrics.state === EngineState.ALERTING && !state.isMonitorView) {
     dom.alertBanner.classList.remove('hidden');
   } else if (metrics.state !== EngineState.ALERTING && !dom.alertBanner.classList.contains('hidden')) {
-    // Fade out alert banner after motion ends
     setTimeout(() => {
       if (detector.state !== EngineState.ALERTING) {
         dom.alertBanner.classList.add('hidden');
@@ -950,10 +1097,6 @@ function onVideoFrame(now) {
   scheduleNextFrame();
 }
 
-/**
- * Extracts the cropped circular bounding box downscaled to 112x112
- * and feeds it to MotionDetector.
- */
 function processFrame(sourceElement, timestamp) {
   let srcW = 1280;
   let srcH = 720;
@@ -971,22 +1114,20 @@ function processFrame(sourceElement, timestamp) {
   const cxPixels = state.zone.cx * srcW;
   const cyPixels = state.zone.cy * srcH;
 
-  // Bounding box of the circle on the native source
   const boxX = Math.max(0, cxPixels - rPixels);
   const boxY = Math.max(0, cyPixels - rPixels);
   const boxW = Math.min(srcW - boxX, rPixels * 2);
   const boxH = Math.min(srcH - boxY, rPixels * 2);
 
-  // 1. Draw cropped ROI into 112x112 processing canvas
+  // 1. Draw ROI into processing canvas
   procCtx.drawImage(
     sourceElement,
     boxX, boxY, boxW, boxH,
     0, 0, dom.processingCanvas.width, dom.processingCanvas.height
   );
-
   const roiImageData = procCtx.getImageData(0, 0, dom.processingCanvas.width, dom.processingCanvas.height);
 
-  // 2. Draw downscaled full frame into 32x24 guard canvas for bump/lighting guard
+  // 2. Draw guard thumbnail for bump detection
   guardCtx.drawImage(
     sourceElement,
     0, 0, srcW, srcH,
@@ -997,7 +1138,6 @@ function processFrame(sourceElement, timestamp) {
   // 3. Process via MotionDetector
   const result = detector.process(roiImageData, guardImageData, timestamp);
 
-  // 4. Update Debug HUD if active
   if (state.debugEnabled) {
     updateDebugHud(result);
   }
@@ -1006,27 +1146,61 @@ function processFrame(sourceElement, timestamp) {
 }
 
 /**
- * Handle motion event alert: audio synthesis, vibration, and banner.
+ * Handle motion event: triggers fullscreen video player (if enabled) or sound alert.
  */
 function onMotionAlert(metrics) {
-  audioAlert.triggerAlert();
-
-  dom.alertBanner.classList.remove('hidden');
+  // Update timestamp
   const now = new Date();
   const timeStr = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
   dom.alertTimestamp.textContent = `${timeStr} (${metrics.changedPercent.toFixed(1)}% area)`;
 
+  // Check if Feature 2 (Video Alert) is enabled
+  if (state.isVideoOnMotion && videoPlayer) {
+    state.isVideoPlaying = true;
+    updateStatusBadge('VIDEO_PLAYING');
+
+    videoPlayer.playAlertVideo({
+      onEnded: () => onVideoAlertComplete(),
+      onSkipped: () => onVideoAlertComplete(),
+      onError: (err) => {
+        console.warn('Video failed, falling back to sound alert:', err);
+        state.isVideoPlaying = false;
+        audioAlert.triggerAlert();
+        scheduleNextFrame();
+      }
+    });
+    return;
+  }
+
+  // Fallback to standalone sound alert
+  audioAlert.triggerAlert();
   updateStatusBadge(EngineState.ALERTING);
 }
 
 /**
- * Update Debug Viewport Canvas and Metrics.
+ * Follows the video completion return-and-recalibrate path.
  */
+function onVideoAlertComplete() {
+  state.isVideoPlaying = false;
+
+  // Short recalibration (~8 frames, ~1.2s) to adjust to scene light change from phone screen
+  updateStatusBadge(EngineState.RESUMING);
+  detector.startCalibration(8, EngineState.RESUMING);
+
+  // Resume motion analysis loop
+  scheduleNextFrame();
+}
+
 function updateDebugHud(metrics) {
   dom.debugChangedVal.textContent = `${metrics.changedPercent.toFixed(1)}%`;
   dom.debugBlobVal.textContent = `${metrics.blobPercent.toFixed(1)}%`;
   dom.debugTimeVal.textContent = `${metrics.processingTimeMs.toFixed(1)} ms`;
-  dom.debugStateVal.textContent = metrics.state;
+  
+  if (state.isVideoPlaying) {
+    dom.debugStateVal.textContent = 'VIDEO PLAYING';
+  } else {
+    dom.debugStateVal.textContent = metrics.state;
+  }
 
   if (metrics.diffMask) {
     if (!debugImageData) {
@@ -1039,7 +1213,6 @@ function updateDebugHud(metrics) {
     for (let i = 0, p = 0; i < len; i++, p += 4) {
       const val = mask[i];
       if (val === 255) {
-        // Red highlight for motion pixels
         d[p] = 239;
         d[p + 1] = 68;
         d[p + 2] = 68;
@@ -1056,13 +1229,9 @@ function updateDebugHud(metrics) {
 }
 
 /* =========================================================================
-   6. Camera-free Demo Mode Simulation
+   7. Demo Mode Simulation
    ========================================================================= */
 
-/**
- * Generates an animated test ground scene with a moving object
- * so users without webcams or developing on desktop can fully test the app.
- */
 function toggleDemoMode() {
   if (state.isDemoMode) {
     stopDemoMode();
@@ -1094,7 +1263,7 @@ function startDemoMode() {
   resizeOverlayCanvas();
   drawOverlay();
 
-  showToast('Demo Mode active: synthetic ground scene with traversing test target.', 'info');
+  showToast('Demo Mode active: synthetic ground scene with traversing target.', 'info');
 }
 
 function stopDemoMode() {
@@ -1117,7 +1286,6 @@ function stopDemoMode() {
 }
 
 function _initDemoGroundTexture() {
-  // Create static ground noise pattern
   const off = document.createElement('canvas');
   off.width = 256;
   off.height = 256;
@@ -1126,7 +1294,7 @@ function _initDemoGroundTexture() {
   const d = imgData.data;
 
   for (let i = 0; i < d.length; i += 4) {
-    const v = 85 + (Math.random() * 30 | 0); // Concrete/pavement tone
+    const v = 85 + (Math.random() * 30 | 0);
     d[i] = v;
     d[i + 1] = v;
     d[i + 2] = v + 4;
@@ -1142,7 +1310,6 @@ function _runDemoAnimationLoop() {
   const w = dom.demoCanvas.width;
   const h = dom.demoCanvas.height;
 
-  // 1. Draw Ground Texture
   if (demoAnim.groundNoisePattern) {
     demoCtx.fillStyle = demoAnim.groundNoisePattern;
     demoCtx.fillRect(0, 0, w, h);
@@ -1151,7 +1318,6 @@ function _runDemoAnimationLoop() {
     demoCtx.fillRect(0, 0, w, h);
   }
 
-  // 2. Animate Test Square Target
   demoAnim.x += demoAnim.vx;
   demoAnim.y += demoAnim.vy;
 
@@ -1162,27 +1328,23 @@ function _runDemoAnimationLoop() {
   const objXPx = demoAnim.x * w;
   const objYPx = demoAnim.y * h;
 
-  // Draw moving contrasting object
   demoCtx.fillStyle = '#1e293b';
   demoCtx.fillRect(objXPx, objYPx, objSizePx, objSizePx);
 
-  // Border on object
   demoCtx.strokeStyle = '#f8fafc';
   demoCtx.lineWidth = 3;
   demoCtx.strokeRect(objXPx, objYPx, objSizePx, objSizePx);
 
-  // Request next demo frame
   requestAnimationFrame(_runDemoAnimationLoop);
 }
 
 /* =========================================================================
-   7. UI State & Status Synchronization
+   8. UI State & Extended Status Synchronization
    ========================================================================= */
 
 function updateUI() {
   const isRunning = state.isCameraActive || state.isDemoMode;
 
-  // Camera toggle button
   if (state.isCameraActive) {
     dom.btnToggleCamera.classList.add('btn-active-stop');
     dom.labelToggleCamera.textContent = 'Stop Camera';
@@ -1191,7 +1353,6 @@ function updateUI() {
     dom.labelToggleCamera.textContent = 'Start Camera';
   }
 
-  // Monitoring toggle button
   dom.btnToggleMonitoring.disabled = !isRunning;
   dom.btnRecalibrate.disabled = !state.isMonitoring;
 
@@ -1207,8 +1368,8 @@ function updateUI() {
 }
 
 /**
- * Updates status badge text, icon, and colors.
- * Requirement: MUST never state "Monitoring" unless camera is live AND loop runs.
+ * Extended Status Synchronization supporting:
+ * Camera Off -> Calibrating -> Monitoring -> Motion Detected (Video Playing) -> Resuming -> Monitoring
  */
 function updateStatusBadge(engineState) {
   dom.statusBadge.className = 'status-badge';
@@ -1234,11 +1395,23 @@ function updateStatusBadge(engineState) {
     return;
   }
 
+  if (state.isVideoPlaying || engineState === 'VIDEO_PLAYING') {
+    dom.statusBadge.classList.add('status-video');
+    dom.statusIcon.textContent = '🎬';
+    dom.statusText.textContent = 'Motion Detected (Video Playing)';
+    return;
+  }
+
   switch (engineState) {
     case EngineState.CALIBRATING:
       dom.statusBadge.classList.add('status-calibrating');
       dom.statusIcon.textContent = '⏳';
       dom.statusText.textContent = 'Calibrating...';
+      break;
+    case EngineState.RESUMING:
+      dom.statusBadge.classList.add('status-resuming');
+      dom.statusIcon.textContent = '⏳';
+      dom.statusText.textContent = 'Resuming...';
       break;
     case EngineState.ALERTING:
       dom.statusBadge.classList.add('status-alert');
@@ -1280,7 +1453,7 @@ function showToast(message, type = 'info', duration = 3500) {
 }
 
 /* =========================================================================
-   8. Settings & Presets Persistence
+   9. Settings & Persistence
    ========================================================================= */
 
 function applyPreset(presetName) {
@@ -1299,7 +1472,6 @@ function applyPreset(presetName) {
   dom.confirmFramesSlider.value = preset.consecutiveFrames;
   dom.confirmFramesVal.textContent = preset.consecutiveFrames;
 
-  // Update preset button active states
   Object.keys(dom.presetButtons).forEach((key) => {
     dom.presetButtons[key].classList.toggle('active', key === presetName);
   });
@@ -1341,7 +1513,11 @@ function persistSettings() {
       volume: dom.volumeSlider.value,
       muted: dom.muteToggle.checked,
       vibrate: dom.vibrateToggle.checked,
-      debug: dom.debugToggle.checked
+      debug: dom.debugToggle.checked,
+      maskColor: state.maskColor,
+      maskOpacity: state.maskOpacity,
+      videoOnMotion: state.isVideoOnMotion,
+      videoAudio: state.isVideoAudio
     };
     localStorage.setItem('ground_motion_detector_prefs', JSON.stringify(data));
   } catch (err) {
@@ -1360,6 +1536,30 @@ function loadPersistedSettings() {
       state.zone.cy = data.zone.cy ?? 0.5;
       state.zone.r = data.zone.r ?? 0.20;
       clampZoneCoordinates();
+    }
+
+    // Mask preferences
+    if (data.maskColor) {
+      state.maskColor = data.maskColor;
+      dom.maskColorPicker.value = data.maskColor;
+      dom.maskColorHex.textContent = data.maskColor.toUpperCase();
+    }
+    if (data.maskOpacity !== undefined) {
+      state.maskOpacity = Number(data.maskOpacity);
+      dom.maskOpacitySlider.value = Math.round(state.maskOpacity * 100);
+      dom.maskOpacityVal.textContent = `${Math.round(state.maskOpacity * 100)}%`;
+    }
+
+    // Video preferences
+    if (data.videoOnMotion !== undefined) {
+      state.isVideoOnMotion = Boolean(data.videoOnMotion);
+      dom.videoOnMotionToggle.checked = state.isVideoOnMotion;
+      if (videoPlayer) videoPlayer.videoEnabled = state.isVideoOnMotion;
+    }
+    if (data.videoAudio !== undefined) {
+      state.isVideoAudio = Boolean(data.videoAudio);
+      dom.videoAudioToggle.checked = state.isVideoAudio;
+      if (videoPlayer) videoPlayer.soundEnabled = state.isVideoAudio;
     }
 
     if (data.volume !== undefined) {
@@ -1418,7 +1618,7 @@ function loadPersistedSettings() {
 }
 
 /* =========================================================================
-   9. Event Bindings & Initializer
+   10. Event Bindings & Initializer
    ========================================================================= */
 
 function initEventListeners() {
@@ -1445,13 +1645,32 @@ function initEventListeners() {
   dom.btnDemoMode.addEventListener('click', toggleDemoMode);
   dom.emptyDemoBtn.addEventListener('click', startDemoMode);
 
-  // Recalibrate button
+  // Monitor View in-view bottom quick bar
+  dom.btnQuickStop.addEventListener('click', (e) => {
+    e.stopPropagation();
+    stopMonitoring();
+  });
+  dom.btnQuickRecalibrate.addEventListener('click', (e) => {
+    e.stopPropagation();
+    detector.startCalibration(12, EngineState.CALIBRATING);
+    showToast('Background recalibrating...', 'info');
+  });
+  dom.btnQuickMute.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const nextMuted = !dom.muteToggle.checked;
+    dom.muteToggle.checked = nextMuted;
+    audioAlert.setMuted(nextMuted);
+    dom.btnQuickMute.textContent = nextMuted ? '🔊 Unmute' : '🔇 Mute';
+    persistSettings();
+    showToast(nextMuted ? 'Muted' : 'Unmuted', 'info');
+  });
+
+  // Recalibrate & Reset Zone
   dom.btnRecalibrate.addEventListener('click', () => {
-    detector.startCalibration();
+    detector.startCalibration(12, EngineState.CALIBRATING);
     showToast('Background model recalibrated', 'info');
   });
 
-  // Reset zone button
   dom.btnResetZone.addEventListener('click', () => {
     state.zone.cx = 0.5;
     state.zone.cy = 0.5;
@@ -1460,6 +1679,79 @@ function initEventListeners() {
     drawOverlay();
     persistSettings();
     showToast('Detection zone reset to center', 'info');
+  });
+
+  // Feature 1: Mask Controls
+  dom.maskColorPicker.addEventListener('input', (e) => {
+    state.maskColor = e.target.value;
+    dom.maskColorHex.textContent = e.target.value.toUpperCase();
+    drawOverlay();
+    persistSettings();
+  });
+
+  dom.maskOpacitySlider.addEventListener('input', (e) => {
+    state.maskOpacity = Number(e.target.value) / 100;
+    dom.maskOpacityVal.textContent = `${e.target.value}%`;
+    drawOverlay();
+    persistSettings();
+  });
+
+  dom.btnResetMask.addEventListener('click', () => {
+    state.maskColor = '#000000';
+    state.maskOpacity = 1.0;
+    dom.maskColorPicker.value = '#000000';
+    dom.maskColorHex.textContent = '#000000';
+    dom.maskOpacitySlider.value = 100;
+    dom.maskOpacityVal.textContent = '100%';
+    drawOverlay();
+    persistSettings();
+    showToast('Mask reset to solid black (100%)', 'info');
+  });
+
+  // Feature 2: Video Alert Controls
+  dom.videoOnMotionToggle.addEventListener('change', (e) => {
+    state.isVideoOnMotion = e.target.checked;
+    if (videoPlayer) videoPlayer.videoEnabled = state.isVideoOnMotion;
+    persistSettings();
+  });
+
+  dom.videoAudioToggle.addEventListener('change', (e) => {
+    state.isVideoAudio = e.target.checked;
+    if (videoPlayer) videoPlayer.soundEnabled = state.isVideoAudio;
+    persistSettings();
+  });
+
+  dom.videoFileInput.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (file && videoPlayer) {
+      await videoPlayer.setCustomVideoFile(file);
+      dom.videoSourceLabel.textContent = `Custom: ${file.name} (${(file.size / (1024 * 1024)).toFixed(1)} MB)`;
+      showToast(`Loaded custom video: ${file.name}`, 'success');
+    }
+  });
+
+  dom.btnResetVideo.addEventListener('click', async () => {
+    if (videoPlayer) {
+      await videoPlayer.resetToDefaultVideo();
+      dom.videoFileInput.value = '';
+      dom.videoSourceLabel.textContent = 'Default: assets/alert-video.mp4 (H.264 MP4 recommended)';
+      showToast('Restored default bundled video', 'info');
+    }
+  });
+
+  dom.btnTestVideo.addEventListener('click', async () => {
+    if (videoPlayer) {
+      showToast('Playing test video alert...', 'info');
+      state.isVideoPlaying = true;
+      updateStatusBadge('VIDEO_PLAYING');
+      await videoPlayer.testPlay({
+        onEnded: () => {
+          state.isVideoPlaying = false;
+          updateUI();
+          drawOverlay();
+        }
+      });
+    }
   });
 
   // Sensitivity Presets
@@ -1547,13 +1839,23 @@ export function cleanup() {
   stopMonitoring();
   stopCamera();
   if (state.isDemoMode) stopDemoMode();
+  if (videoPlayer) videoPlayer.cleanup();
   audioAlert.cleanup();
   detector.destroy();
 }
 
 // Bootstrap
 window.addEventListener('DOMContentLoaded', () => {
-  // Check vibration support
+  // Initialize VideoAlertPlayer
+  videoPlayer = new VideoAlertPlayer({
+    containerEl: dom.alertVideoOverlay,
+    videoEl: dom.alertVideo,
+    skipBtn: dom.btnSkipVideo,
+    unmuteBtn: dom.btnUnmuteVideo,
+    videoEnabled: state.isVideoOnMotion,
+    soundEnabled: state.isVideoAudio
+  });
+
   if (!AudioAlert.isVibrationSupported()) {
     dom.vibrationRow.style.display = 'none';
   }
