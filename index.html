@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="description" content="Monitor a selected ground area with circular motion detection and instant audio alerts on device.">
+  <meta name="theme-color" content="#090d16">
+  <title>Ground Motion Detector</title>
+  
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%233b82f6' stroke-width='2'><circle cx='12' cy='12' r='9'/><circle cx='12' cy='12' r='4' stroke-dasharray='2 2'/><path d='M12 2v3M12 19v3M2 12h3M19 12h3'/></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Top Header & App Bar -->
+    <header class="app-header">
+      <div class="header-branding">
+        <div class="logo-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="9" />
+            <circle cx="12" cy="12" r="4" stroke-dasharray="2 2" />
+            <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
+          </svg>
+        </div>
+        <div>
+          <h1 class="app-title">Ground Motion Detector</h1>
+          <p class="app-subtitle">Monitor a selected area and receive an audio alert when movement is detected.</p>
+        </div>
+      </div>
+
+      <!-- Live Status Badge (accessible live region) -->
+      <div id="statusBadge" class="status-badge status-off" role="status" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="statusIcon" class="status-icon" aria-hidden="true">📷</span>
+        <span id="statusText" class="status-text">Camera Off</span>
+      </div>
+    </header>
+
+    <!-- Steady Device / OS Stand Notice -->
+    <aside class="notice-bar" role="note">
+      <span class="notice-icon" aria-hidden="true">ℹ️</span>
+      <span class="notice-text">
+        <strong>Stand required:</strong> Place your phone on a steady stand or tripod pointed at the ground. Hand-held use is not supported. Browsers cannot monitor with the screen off or when minimized.
+      </span>
+    </aside>
+
+    <!-- Alert Banner (Appears on Motion) -->
+    <div id="alertBanner" class="alert-banner hidden" role="alert" aria-live="assertive">
+      <div class="alert-content">
+        <span class="alert-icon" aria-hidden="true">🚨</span>
+        <div class="alert-text-group">
+          <strong class="alert-headline">Motion Detected!</strong>
+          <span id="alertTimestamp" class="alert-timestamp">Just now</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Viewport Area (Video + Interactive Overlay) -->
+    <main class="viewport-wrapper">
+      <div id="videoContainer" class="video-container" tabindex="0" aria-label="Camera live feed and detection zone">
+        <!-- Live Video Element (iOS inline playback requirements) -->
+        <video 
+          id="cameraFeed" 
+          autoplay 
+          playsinline 
+          muted 
+          aria-hidden="true"
+        ></video>
+
+        <!-- Simulated Ground Canvas for Demo Mode -->
+        <canvas id="demoCanvas" class="demo-canvas hidden" aria-hidden="true"></canvas>
+
+        <!-- Interactive Vector / Canvas Overlay for Circular Detection Zone -->
+        <canvas id="overlayCanvas" class="overlay-canvas" aria-label="Interactive circular motion detection zone"></canvas>
+
+        <!-- Fallback / Empty Placeholder when Camera is Off -->
+        <div id="emptyCameraState" class="empty-state">
+          <div class="empty-icon-wrap" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+              <circle cx="12" cy="13" r="4"/>
+            </svg>
+          </div>
+          <p class="empty-title">Camera is inactive</p>
+          <p class="empty-desc">Tap <strong>Start Camera</strong> or try <strong>Demo Mode</strong> to begin detection</p>
+          <div class="empty-actions">
+            <button id="emptyStartBtn" class="btn btn-primary" type="button">
+              <span>Start Camera</span>
+            </button>
+            <button id="emptyDemoBtn" class="btn btn-secondary" type="button">
+              <span>Launch Demo Mode</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Touch/Drag Instruction Overlay Pill -->
+        <div id="zoneHelperPill" class="zone-helper-pill hidden" aria-hidden="true">
+          <span>Drag circle to position • Pinch to resize</span>
+        </div>
+
+        <!-- Debug Analytics HUD Overlay -->
+        <div id="debugHud" class="debug-hud hidden" aria-live="off">
+          <div class="debug-header">
+            <span>Debug Analysis</span>
+            <span id="debugFpsBadge">0 FPS</span>
+          </div>
+          <div class="debug-body">
+            <canvas id="debugMaskCanvas" class="debug-mask-canvas" width="112" height="112" title="Difference & motion mask"></canvas>
+            <div class="debug-stats">
+              <div><span>Changed:</span> <strong id="debugChangedVal">0.0%</strong></div>
+              <div><span>Blob Size:</span> <strong id="debugBlobVal">0.0%</strong></div>
+              <div><span>Compute:</span> <strong id="debugTimeVal">0.0 ms</strong></div>
+              <div><span>State:</span> <strong id="debugStateVal">IDLE</strong></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Primary Control Panel -->
+    <section class="controls-panel" aria-label="Control settings">
+      <!-- Quick Primary Actions Bar -->
+      <div class="action-bar">
+        <button id="btnToggleCamera" class="btn btn-primary" type="button" aria-pressed="false">
+          <span class="btn-icon">📷</span>
+          <span id="labelToggleCamera">Start Camera</span>
+        </button>
+
+        <button id="btnToggleMonitoring" class="btn btn-success" type="button" disabled aria-pressed="false">
+          <span class="btn-icon">▶️</span>
+          <span id="labelToggleMonitoring">Start Monitoring</span>
+        </button>
+
+        <button id="btnSwitchCamera" class="btn btn-icon-only hidden" type="button" title="Switch Camera" aria-label="Switch camera lens">
+          <span>🔄</span>
+        </button>
+
+        <button id="btnDemoMode" class="btn btn-secondary" type="button" title="Toggle simulation test pattern without camera">
+          <span class="btn-icon">🧪</span>
+          <span id="labelDemoMode">Demo Mode</span>
+        </button>
+      </div>
+
+      <!-- Zone & Recalibration Quick Row -->
+      <div class="zone-quick-bar">
+        <button id="btnRecalibrate" class="btn btn-ghost" type="button" disabled title="Recalibrate background model immediately">
+          <span>⚖️ Recalibrate</span>
+        </button>
+        <button id="btnResetZone" class="btn btn-ghost" type="button" title="Center the circle zone and reset size">
+          <span>🎯 Reset Zone</span>
+        </button>
+        <div class="slider-group zone-size-group">
+          <label for="circleRadiusSlider" class="control-label">
+            <span>Zone Size</span>
+            <span id="circleRadiusVal" class="val-tag">20%</span>
+          </label>
+          <input type="range" id="circleRadiusSlider" min="10" max="42" step="1" value="20" aria-label="Detection circle radius percentage">
+        </div>
+      </div>
+
+      <!-- Sensitivity Presets Selection -->
+      <div class="card control-card">
+        <div class="card-header">
+          <span class="card-title">Motion Sensitivity</span>
+          <span id="customPresetBadge" class="badge-custom hidden">Custom</span>
+        </div>
+        <div class="preset-buttons" role="group" aria-label="Sensitivity preset options">
+          <button id="presetLow" class="btn-preset" type="button" data-preset="low">
+            <span class="preset-name">Low</span>
+            <span class="preset-desc">Large movement</span>
+          </button>
+          <button id="presetMedium" class="btn-preset active" type="button" data-preset="medium">
+            <span class="preset-name">Medium</span>
+            <span class="preset-desc">Recommended</span>
+          </button>
+          <button id="presetHigh" class="btn-preset" type="button" data-preset="high">
+            <span class="preset-name">High</span>
+            <span class="preset-desc">Subtle movement</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Audio Alert Settings -->
+      <div class="card control-card">
+        <div class="card-header">
+          <span class="card-title">Audio & Notification</span>
+          <button id="btnTestSound" class="btn btn-ghost btn-sm" type="button">
+            <span>🔊 Test Sound</span>
+          </button>
+        </div>
+        <div class="audio-controls-grid">
+          <div class="input-field">
+            <label for="soundTypeSelect" class="control-label">Sound Tone</label>
+            <select id="soundTypeSelect" class="select-input">
+              <option value="alarm" selected>Alarm (3 Rising Beeps)</option>
+              <option value="beep">Short Beep (Single)</option>
+            </select>
+          </div>
+
+          <div class="slider-group">
+            <label for="volumeSlider" class="control-label">
+              <span>Volume</span>
+              <span id="volumeVal" class="val-tag">80%</span>
+            </label>
+            <input type="range" id="volumeSlider" min="0" max="100" step="5" value="80">
+          </div>
+
+          <div class="toggle-row">
+            <label class="toggle-label" for="muteToggle">
+              <span>Mute Alert Sound</span>
+            </label>
+            <input type="checkbox" id="muteToggle" class="switch-checkbox">
+          </div>
+
+          <div class="toggle-row" id="vibrationRow">
+            <label class="toggle-label" for="vibrateToggle">
+              <span>Vibrate on Alert</span>
+              <small class="hint-text">(Supported mobile devices)</small>
+            </label>
+            <input type="checkbox" id="vibrateToggle" class="switch-checkbox">
+          </div>
+        </div>
+      </div>
+
+      <!-- Collapsible Advanced Tuning -->
+      <details class="card collapsible-card" id="advancedDetails">
+        <summary class="collapsible-summary">
+          <span class="summary-title">⚙️ Advanced Vision Parameters</span>
+          <span class="summary-indicator" aria-hidden="true">▾</span>
+        </summary>
+        <div class="advanced-grid">
+          <div class="slider-group">
+            <label for="pixelThresholdSlider" class="control-label">
+              <span>Pixel Diff Threshold</span>
+              <span id="pixelThresholdVal" class="val-tag">25</span>
+            </label>
+            <input type="range" id="pixelThresholdSlider" min="8" max="60" step="1" value="25">
+            <small class="field-help">Lower = detects fainter color/intensity changes</small>
+          </div>
+
+          <div class="slider-group">
+            <label for="areaThresholdSlider" class="control-label">
+              <span>Min Changed Area</span>
+              <span id="areaThresholdVal" class="val-tag">3.0%</span>
+            </label>
+            <input type="range" id="areaThresholdSlider" min="0.5" max="15.0" step="0.5" value="3.0">
+            <small class="field-help">Percentage of circle zone that must change</small>
+          </div>
+
+          <div class="slider-group">
+            <label for="sampleIntervalSlider" class="control-label">
+              <span>Sampling Interval</span>
+              <span id="sampleIntervalVal" class="val-tag">150 ms</span>
+            </label>
+            <input type="range" id="sampleIntervalSlider" min="100" max="500" step="25" value="150">
+            <small class="field-help">Rate of frame analysis (lower = faster response)</small>
+          </div>
+
+          <div class="slider-group">
+            <label for="confirmFramesSlider" class="control-label">
+              <span>Confirm Frames</span>
+              <span id="confirmFramesVal" class="val-tag">2</span>
+            </label>
+            <input type="range" id="confirmFramesSlider" min="1" max="6" step="1" value="2">
+            <small class="field-help">Consecutive frames required to trigger alert</small>
+          </div>
+
+          <div class="slider-group">
+            <label for="cooldownSlider" class="control-label">
+              <span>Alert Cooldown</span>
+              <span id="cooldownVal" class="val-tag">2.0 s</span>
+            </label>
+            <input type="range" id="cooldownSlider" min="0" max="10" step="0.5" value="2">
+            <small class="field-help">Quiet duration between consecutive alerts</small>
+          </div>
+
+          <div class="toggle-row">
+            <label class="toggle-label" for="debugToggle">
+              <span>Show Debug Analysis HUD</span>
+              <small class="hint-text">Live mask, blob metrics & compute timing</small>
+            </label>
+            <input type="checkbox" id="debugToggle" class="switch-checkbox">
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <!-- Error & Notification Toast Container -->
+    <div id="toastContainer" class="toast-container" aria-live="polite"></div>
+  </div>
+
+  <!-- Offscreen Processing Canvas for Machine Vision (willReadFrequently: true) -->
+  <canvas id="processingCanvas" class="hidden-canvas" width="112" height="112" aria-hidden="true"></canvas>
+  <!-- Offscreen Guard Canvas for global shift detection -->
+  <canvas id="guardCanvas" class="hidden-canvas" width="32" height="24" aria-hidden="true"></canvas>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
