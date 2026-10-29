@@ -80,13 +80,16 @@ export class VideoAlertPlayer {
    */
   async unlockAutoplay() {
     if (!this.videoEl) return;
+    if (!this.videoEl.src || this.videoEl.src === '' || this.videoEl.src.endsWith('/')) {
+      this.videoEl.src = this.currentObjectUrl || this.defaultVideoSrc;
+    }
     try {
       this.videoEl.muted = !this.soundEnabled;
       const playPromise = this.videoEl.play();
       if (playPromise !== undefined) {
         await playPromise;
         this.videoEl.pause();
-        this.videoEl.currentTime = 0;
+        try { this.videoEl.currentTime = 0; } catch (_) {}
         this.isAutoplayUnlocked = true;
       }
     } catch (err) {
@@ -97,7 +100,7 @@ export class VideoAlertPlayer {
         if (fallbackPromise !== undefined) {
           await fallbackPromise;
           this.videoEl.pause();
-          this.videoEl.currentTime = 0;
+          try { this.videoEl.currentTime = 0; } catch (_) {}
           this.isAutoplayUnlocked = true;
         }
       } catch (err2) {
@@ -168,10 +171,10 @@ export class VideoAlertPlayer {
   /**
    * Play the fullscreen alert video.
    * 
-   * @param {Object} callbacks { onEnded, onSkipped, onError }
+   * @param {Object} callbacks { onEnded, onSkipped, onError, onFallbackSound }
    * @returns {Promise<boolean>} True if video playback started, false otherwise
    */
-  async playAlertVideo({ onEnded, onSkipped, onError }) {
+  async playAlertVideo({ onEnded, onSkipped, onError, onFallbackSound }) {
     if (!this.videoEnabled || this.isPlaying) {
       return false;
     }
@@ -181,9 +184,16 @@ export class VideoAlertPlayer {
     this.onSkippedCallback = onSkipped;
     this.onErrorCallback = onError;
 
+    // Ensure video src is valid
+    if (!this.videoEl.src || this.videoEl.src === '' || this.videoEl.src.endsWith('/')) {
+      this.videoEl.src = this.currentObjectUrl || this.defaultVideoSrc;
+    }
+
     // Configure audio
     this.videoEl.muted = !this.soundEnabled;
-    this.videoEl.currentTime = 0;
+    try {
+      this.videoEl.currentTime = 0;
+    } catch (_) {}
 
     // Show container
     this.containerEl.classList.remove('hidden');
@@ -209,6 +219,10 @@ export class VideoAlertPlayer {
         try {
           this.videoEl.muted = true;
           await this.videoEl.play();
+          // If video was forced to play muted by browser policy, also trigger audio alert tone
+          if (typeof onFallbackSound === 'function') {
+            onFallbackSound();
+          }
           // Show "Tap for sound" button so user can unmute
           if (this.unmuteBtn) {
             this.unmuteBtn.classList.remove('hidden');

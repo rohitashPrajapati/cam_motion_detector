@@ -141,6 +141,17 @@
             </div>
           </div>
         </div>
+
+        <!-- Fullscreen Video Alert Overlay (Inside videoContainer so it renders in native Fullscreen) -->
+        <div id="alertVideoOverlay" class="alert-video-overlay hidden" role="dialog" aria-modal="true" aria-label="Alert Video Player">
+          <video id="alertVideo" class="alert-video" playsinline webkit-playsinline preload="auto" src="assets/alert-video.mp4"></video>
+          <button id="btnSkipVideo" class="btn btn-skip-video hidden" type="button" aria-label="Skip video alert">
+            <span>Skip ✕</span>
+          </button>
+          <button id="btnUnmuteVideo" class="btn btn-unmute-video hidden" type="button" aria-label="Unmute video sound">
+            <span>🔊 Tap for Sound</span>
+          </button>
+        </div>
       </div>
     </main>
 
@@ -596,16 +607,6 @@
     <div id="toastContainer" class="toast-container" aria-live="polite"></div>
   </div>
 
-  <!-- Fullscreen Video Alert Overlay (Z-index above everything) -->
-  <div id="alertVideoOverlay" class="alert-video-overlay hidden" role="dialog" aria-modal="true" aria-label="Alert Video Player">
-    <video id="alertVideo" class="alert-video" playsinline webkit-playsinline preload="auto"></video>
-    <button id="btnSkipVideo" class="btn btn-skip-video hidden" type="button" aria-label="Skip video alert">
-      <span>Skip ✕</span>
-    </button>
-    <button id="btnUnmuteVideo" class="btn btn-unmute-video hidden" type="button" aria-label="Unmute video sound">
-      <span>🔊 Tap for Sound</span>
-    </button>
-  </div>
 
   <!-- Offscreen Processing Canvas for Machine Vision (willReadFrequently: true) -->
   <canvas id="processingCanvas" class="hidden-canvas" width="112" height="112" aria-hidden="true"></canvas>

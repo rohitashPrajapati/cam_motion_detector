@@ -902,6 +902,9 @@ dom.videoContainer.addEventListener('click', (e) => {
 async function startCamera() {
   stopCamera();
   if (state.isDemoMode) stopDemoMode();
+  if (videoPlayer) {
+    videoPlayer.unlockAutoplay();
+  }
 
   updateStatusBadge('STARTING_CAMERA');
   showToast('Requesting camera access...', 'info');
@@ -1243,6 +1246,10 @@ function onMotionAlert(metrics) {
     });
 
     videoPlayer.playAlertVideo({
+      onFallbackSound: () => {
+        // If autoplay policy forces video muted on mobile/laptop, trigger audio alert in parallel
+        audioAlert.triggerAlert();
+      },
       onEnded: () => {
         onVideoPlaybackDone();
       },

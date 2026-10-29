@@ -202,14 +202,12 @@ html, body {
    ========================================================================= */
 
 .alert-video-overlay {
-  position: fixed !important;
+  position: absolute !important;
   inset: 0 !important;
   top: 0 !important;
   left: 0 !important;
-  width: 100vw !important;
-  width: 100dvw !important;
-  height: 100vh !important;
-  height: 100dvh !important;
+  width: 100% !important;
+  height: 100% !important;
   background-color: #000000 !important;
   z-index: 99999 !important;
   display: flex !important;
