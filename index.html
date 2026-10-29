@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <meta name="description" content="Monitor a selected ground area with circular motion detection, fullscreen masking, and video alerts on device.">
+  <meta name="description" content="Monitor a selected ground area with circular motion detection, animated fire ring, projector mode, and video alerts.">
   <meta name="theme-color" content="#090d16">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -33,38 +33,37 @@
         </div>
         <div>
           <h1 class="app-title">Ground Motion Detector</h1>
-          <p class="app-subtitle">Monitor a selected area and trigger video alerts when movement is detected.</p>
+          <p class="app-subtitle">Monitor ground circle with fire ring projection and video alerts.</p>
         </div>
       </div>
 
       <!-- Live Status Badge (accessible live region) -->
-      <div id="statusBadge" class="status-badge status-off" role="status" aria-live="polite">
-        <span class="status-dot" aria-hidden="true"></span>
-        <span id="statusIcon" class="status-icon" aria-hidden="true">📷</span>
+      <div id="statusBadge" class="status-badge state-idle" role="status" aria-live="polite">
+        <span class="status-indicator" aria-hidden="true"></span>
         <span id="statusText" class="status-text">Camera Off</span>
       </div>
     </header>
 
-    <!-- Steady Device / OS Stand Notice -->
-    <aside id="noticeBar" class="notice-bar" role="note">
+    <!-- Tripod / Stand Guidance Notice Banner -->
+    <div id="noticeBar" class="notice-bar" role="note">
       <span class="notice-icon" aria-hidden="true">ℹ️</span>
-      <span class="notice-text">
-        <strong>Stand required:</strong> Place your phone on a steady stand or tripod pointed at the ground. Hand-held use is not supported. Browsers cannot monitor with the screen off or when minimized.
+      <span class="notice-content">
+        <strong>Stand required:</strong> Place phone on a steady stand/tripod pointing at the floor. In <strong>Projector Mode</strong>, cast screen to floor projector and jump into the fire ring!
       </span>
-    </aside>
+    </div>
 
-    <!-- Alert Banner (Appears on Motion) -->
+    <!-- Active Alert Notification Banner (hidden by default) -->
     <div id="alertBanner" class="alert-banner hidden" role="alert" aria-live="assertive">
       <div class="alert-content">
-        <span class="alert-icon" aria-hidden="true">🚨</span>
-        <div class="alert-text-group">
-          <strong class="alert-headline">Motion Detected!</strong>
+        <span class="alert-bell" aria-hidden="true">🚨</span>
+        <div>
+          <strong class="alert-title">MOTION DETECTED IN CIRCLE!</strong>
           <span id="alertTimestamp" class="alert-timestamp">Just now</span>
         </div>
       </div>
     </div>
 
-    <!-- Main Viewport Area (Video + Interactive Overlay) -->
+    <!-- Main Viewport Area (Video + Interactive Overlay + Fire Ring Canvas) -->
     <main class="viewport-wrapper">
       <div id="videoContainer" class="video-container" tabindex="0" aria-label="Camera live feed and detection zone">
         <!-- Live Video Element (iOS inline playback requirements) -->
@@ -81,6 +80,12 @@
 
         <!-- Interactive Vector / Canvas Overlay for Mask & Circular Detection Zone -->
         <canvas id="overlayCanvas" class="overlay-canvas" aria-label="Interactive circular motion detection zone"></canvas>
+
+        <!-- Feature 1: Dedicated Fire Ring Canvas Layer (above mask, below UI) -->
+        <canvas id="fireCanvas" class="fire-canvas" aria-hidden="true"></canvas>
+
+        <!-- Feature 3: Camera-to-Projector Alignment Grid & Target Overlay -->
+        <canvas id="alignmentGridCanvas" class="alignment-grid-canvas hidden" aria-hidden="true"></canvas>
 
         <!-- Fallback / Empty Placeholder when Camera is Off -->
         <div id="emptyCameraState" class="empty-state">
@@ -107,7 +112,6 @@
           <span>Drag circle to position • Pinch to resize</span>
         </div>
 
-
         <!-- Quick In-View Action Bar (Auto-hides after 4s) -->
         <div id="monitorQuickBar" class="monitor-quick-bar hidden" role="toolbar" aria-label="Quick monitor actions">
           <button id="btnQuickStop" class="btn btn-sm btn-quick" type="button">⏹ Stop</button>
@@ -128,6 +132,12 @@
               <div><span>Blob Size:</span> <strong id="debugBlobVal">0.0%</strong></div>
               <div><span>Compute:</span> <strong id="debugTimeVal">0.0 ms</strong></div>
               <div><span>State:</span> <strong id="debugStateVal">IDLE</strong></div>
+              <div><span>Fire:</span> <strong id="debugFireFpsVal">60 FPS (350 pts)</strong></div>
+              <div><span>Active Zone:</span> <strong id="debugActiveRadiusVal">90% (10% guard)</strong></div>
+            </div>
+            <div class="debug-projector-test">
+              <button id="btnProjectorTest" class="btn btn-ghost btn-xs" type="button">🧪 Run 10s Projector Test</button>
+              <div id="projectorTestResult" class="projector-test-result">No test run yet</div>
             </div>
           </div>
         </div>
@@ -138,44 +148,255 @@
     <section id="controlsPanel" class="controls-panel" aria-label="Control settings">
       <!-- Quick Primary Actions Bar -->
       <div class="action-bar">
-        <button id="btnToggleCamera" class="btn btn-primary" type="button" aria-pressed="false">
+        <button id="btnStartCamera" class="btn btn-primary" type="button">
           <span class="btn-icon">📷</span>
-          <span id="labelToggleCamera">Start Camera</span>
+          <span class="btn-text">Start Camera</span>
         </button>
 
-        <button id="btnToggleMonitoring" class="btn btn-success" type="button" disabled aria-pressed="false">
-          <span class="btn-icon">▶️</span>
-          <span id="labelToggleMonitoring">Start Monitoring</span>
+        <button id="btnMonitor" class="btn btn-success" type="button" disabled>
+          <span class="btn-icon">▶</span>
+          <span class="btn-text">Start Monitoring</span>
         </button>
 
-        <button id="btnSwitchCamera" class="btn btn-icon-only hidden" type="button" title="Switch Camera" aria-label="Switch camera lens">
-          <span>🔄</span>
-        </button>
-
-        <button id="btnDemoMode" class="btn btn-secondary" type="button" title="Toggle simulation test pattern without camera">
+        <button id="btnDemo" class="btn btn-secondary" type="button">
           <span class="btn-icon">🧪</span>
-          <span id="labelDemoMode">Demo Mode</span>
+          <span class="btn-text">Demo Mode</span>
         </button>
       </div>
 
-      <!-- Zone & Recalibration Quick Row -->
-      <div class="zone-quick-bar">
-        <button id="btnRecalibrate" class="btn btn-ghost" type="button" disabled title="Recalibrate background model immediately">
-          <span>⚖️ Recalibrate</span>
-        </button>
-        <button id="btnResetZone" class="btn btn-ghost" type="button" title="Center the circle zone and reset size">
-          <span>🎯 Reset Zone</span>
-        </button>
-        <div class="slider-group zone-size-group">
-          <label for="circleRadiusSlider" class="control-label">
+      <!-- Zone Adjustment Bar -->
+      <div class="card zone-card">
+        <div class="zone-actions">
+          <button id="btnRecalibrate" class="btn btn-secondary btn-sm" type="button" disabled>
+            <span class="btn-icon">⚖️</span>
+            <span>Recalibrate</span>
+          </button>
+          <button id="btnResetZone" class="btn btn-ghost btn-sm" type="button">
+            <span class="btn-icon">🎯</span>
+            <span>Reset Zone</span>
+          </button>
+        </div>
+
+        <div class="slider-group">
+          <label for="zoneSizeSlider" class="control-label">
             <span>Zone Size</span>
-            <span id="circleRadiusVal" class="val-tag">20%</span>
+            <span id="zoneSizeVal" class="val-tag">40%</span>
           </label>
-          <input type="range" id="circleRadiusSlider" min="10" max="42" step="1" value="20" aria-label="Detection circle radius percentage">
+          <input type="range" id="zoneSizeSlider" min="15" max="85" step="1" value="40">
         </div>
       </div>
 
-      <!-- Feature 1: Outside Mask Appearance Settings -->
+      <!-- Feature 1: Fire Ring Effect Settings -->
+      <details class="card collapsible-card" id="fireRingDetails" open>
+        <summary class="collapsible-summary">
+          <span class="summary-title">🔥 Fire Ring Effect & Themes</span>
+          <span class="summary-indicator" aria-hidden="true">▾</span>
+        </summary>
+        <div class="card-content-grid">
+          <div class="toggle-row">
+            <label class="toggle-label" for="fireRingToggle">
+              <span>Enable Fire Ring</span>
+              <small class="hint-text">Renders glowing procedural flame ring along detection boundary</small>
+            </label>
+            <input type="checkbox" id="fireRingToggle" class="switch-checkbox" checked>
+          </div>
+
+          <div class="preset-buttons" role="group" aria-label="Fire color theme options">
+            <button id="presetFireOrange" class="btn-preset active" type="button" data-fire-theme="orange">
+              <span class="preset-name">Classic Orange</span>
+              <span class="preset-desc">Warm fire</span>
+            </button>
+            <button id="presetFireBlue" class="btn-preset" type="button" data-fire-theme="blue">
+              <span class="preset-name">Blue Flame</span>
+              <span class="preset-desc">Gas fire</span>
+            </button>
+            <button id="presetFireGreen" class="btn-preset" type="button" data-fire-theme="green">
+              <span class="preset-name">Toxic Green</span>
+              <span class="preset-desc">Acid fire</span>
+            </button>
+            <button id="presetFirePurple" class="btn-preset" type="button" data-fire-theme="purple">
+              <span class="preset-name">Magic Purple</span>
+              <span class="preset-desc">Mystic fire</span>
+            </button>
+          </div>
+
+          <div class="color-picker-row">
+            <label for="fireCustomColorPicker" class="control-label">Custom Base Flame Color</label>
+            <div class="color-picker-group">
+              <input type="color" id="fireCustomColorPicker" value="#ff4500" class="color-input">
+              <span id="fireCustomColorHex" class="color-hex-tag">#FF4500</span>
+            </div>
+          </div>
+
+          <div class="slider-group">
+            <label for="fireIntensitySlider" class="control-label">
+              <span>Flame Height / Intensity</span>
+              <span id="fireIntensityVal" class="val-tag">2.5x</span>
+            </label>
+            <input type="range" id="fireIntensitySlider" min="0.4" max="2.5" step="0.1" value="2.5">
+          </div>
+
+          <div class="slider-group">
+            <label for="fireThicknessSlider" class="control-label">
+              <span>Ring Thickness</span>
+              <span id="fireThicknessVal" class="val-tag">32px</span>
+            </label>
+            <input type="range" id="fireThicknessSlider" min="6" max="32" step="2" value="32">
+          </div>
+
+          <div class="slider-group">
+            <label for="fireSpeedSlider" class="control-label">
+              <span>Flame Speed</span>
+              <span id="fireSpeedVal" class="val-tag">1.0x</span>
+            </label>
+            <input type="range" id="fireSpeedSlider" min="0.4" max="2.4" step="0.1" value="1.0">
+          </div>
+
+          <div class="toggle-row">
+            <label class="toggle-label" for="fireEmbersToggle">
+              <span>Floating Embers & Sparks</span>
+              <small class="hint-text">Sparks rise outwards from flame tongues</small>
+            </label>
+            <input type="checkbox" id="fireEmbersToggle" class="switch-checkbox" checked>
+          </div>
+
+          <div class="toggle-row">
+            <label class="toggle-label" for="fireGlowToggle">
+              <span>Interior Floor Glow</span>
+              <small class="hint-text">Subtle warm glow across the floor inside the ring</small>
+            </label>
+            <input type="checkbox" id="fireGlowToggle" class="switch-checkbox" checked>
+          </div>
+
+          <div class="toggle-row">
+            <label class="toggle-label" for="fireCrackleToggle">
+              <span>Ambient Fire Crackle Sound</span>
+              <small class="hint-text">Synthesized Web Audio fire hiss and clicks (off by default)</small>
+            </label>
+            <input type="checkbox" id="fireCrackleToggle" class="switch-checkbox" checked>
+          </div>
+
+          <div class="slider-group" id="crackleVolumeGroup">
+            <label for="fireCrackleVolumeSlider" class="control-label">
+              <span>Crackle Volume</span>
+              <span id="fireCrackleVolumeVal" class="val-tag">60%</span>
+            </label>
+            <input type="range" id="fireCrackleVolumeSlider" min="5" max="100" step="5" value="60">
+          </div>
+        </div>
+      </details>
+
+      <!-- Feature 2: Feedback-Loop Protection & Guard Band -->
+      <details class="card collapsible-card" id="feedbackProtectionDetails">
+        <summary class="collapsible-summary">
+          <span class="summary-title">🛡️ Feedback-Loop Protection</span>
+          <span class="summary-indicator" aria-hidden="true">▾</span>
+        </summary>
+        <div class="card-content-grid">
+          <div class="slider-group">
+            <label for="guardBandSlider" class="control-label">
+              <span>Fire Guard Band</span>
+              <span id="guardBandVal" class="val-tag">10%</span>
+            </label>
+            <input type="range" id="guardBandSlider" min="4" max="30" step="1" value="10">
+            <small class="field-help">Excludes the lit fire ring from motion analysis. Active detection radius = Circle Radius × (1 - GuardBand%).</small>
+          </div>
+
+          <div class="info-callout">
+            <div class="info-title">Automatic Anti-Feedback Protections:</div>
+            <ul class="info-list">
+              <li><strong>Steady-State Calibration:</strong> Baseline includes fire ring's floor illumination.</li>
+              <li><strong>Edge Soft Falloff:</strong> Outer 15% of active circle has up to +40% higher threshold to absorb flame reflections.</li>
+              <li><strong>Flare Suppression:</strong> Flare on motion suppresses detection during flare + recalibration.</li>
+              <li><strong>Flame-Excluded Guard:</strong> Outside camera-bump sensor excludes the fire spill zone.</li>
+            </ul>
+          </div>
+        </div>
+      </details>
+
+      <!-- Feature 3: Projector Mode & Alignment -->
+      <details class="card collapsible-card" id="projectorModeDetails">
+        <summary class="collapsible-summary">
+          <span class="summary-title">📽️ Projector Mode & Alignment</span>
+          <span class="summary-indicator" aria-hidden="true">▾</span>
+        </summary>
+        <div class="card-content-grid">
+          <div class="toggle-row">
+            <label class="toggle-label" for="projectorModeToggle">
+              <span>Enable Projector Mode</span>
+              <small class="hint-text">Pure black background, hides live camera feed on display, outputs only fire ring & alert video</small>
+            </label>
+            <input type="checkbox" id="projectorModeToggle" class="switch-checkbox">
+          </div>
+
+          <div class="alignment-header">
+            <span class="control-label">Camera-to-Projector Alignment</span>
+            <div class="alignment-actions">
+              <button id="btnToggleAlignmentGrid" class="btn btn-ghost btn-sm" type="button">📐 Alignment Grid</button>
+              <button id="btnResetAlignment" class="btn btn-ghost btn-sm" type="button">Reset</button>
+            </div>
+          </div>
+
+          <div class="slider-group">
+            <label for="projectorOffsetXSlider" class="control-label">
+              <span>Projector Offset X</span>
+              <span id="projectorOffsetXVal" class="val-tag">0%</span>
+            </label>
+            <input type="range" id="projectorOffsetXSlider" min="-30" max="30" step="1" value="0">
+          </div>
+
+          <div class="slider-group">
+            <label for="projectorOffsetYSlider" class="control-label">
+              <span>Projector Offset Y</span>
+              <span id="projectorOffsetYVal" class="val-tag">0%</span>
+            </label>
+            <input type="range" id="projectorOffsetYSlider" min="-30" max="30" step="1" value="0">
+          </div>
+
+          <div class="slider-group">
+            <label for="projectorScaleSlider" class="control-label">
+              <span>Projector Scale</span>
+              <span id="projectorScaleVal" class="val-tag">100%</span>
+            </label>
+            <input type="range" id="projectorScaleSlider" min="60" max="150" step="1" value="100">
+          </div>
+
+          <div class="toggle-row">
+            <label class="toggle-label" for="projectorFlipHToggle">
+              <span>Horizontal Mirror (Flip H)</span>
+              <small class="hint-text">Flip projection horizontally for front-cast or mirror displays</small>
+            </label>
+            <input type="checkbox" id="projectorFlipHToggle" class="switch-checkbox">
+          </div>
+
+          <div class="toggle-row">
+            <label class="toggle-label" for="projectorFlipVToggle">
+              <span>Vertical Mirror (Flip V)</span>
+              <small class="hint-text">Invert projection vertically for ceiling-mounted projectors</small>
+            </label>
+            <input type="checkbox" id="projectorFlipVToggle" class="switch-checkbox">
+          </div>
+
+          <div class="input-field">
+            <label for="projectorRotationSelect" class="control-label">Rotation</label>
+            <select id="projectorRotationSelect" class="select-input">
+              <option value="0" selected>0° (Normal)</option>
+              <option value="90">90° (Clockwise)</option>
+              <option value="180">180° (Inverted)</option>
+              <option value="270">270° (Counter-clockwise)</option>
+            </select>
+          </div>
+
+          <div class="button-row">
+            <button id="btnOpenProjectorWindow" class="btn btn-secondary btn-sm" type="button">
+              <span>🖥 Open Popout Projector Window</span>
+            </button>
+          </div>
+          <small class="field-help">For dual-screen setups (extended monitor/projector). Mirrored display casting works directly in single window.</small>
+        </div>
+      </details>
+
+      <!-- Outside Area Mask Settings -->
       <div class="card control-card">
         <div class="card-header">
           <span class="card-title">Mask Outside Area (Fullscreen View)</span>
@@ -184,22 +405,24 @@
         <div class="mask-controls-grid">
           <div class="color-picker-row">
             <label for="maskColorPicker" class="control-label">Mask Color</label>
-            <div class="color-picker-wrap">
-              <input type="color" id="maskColorPicker" value="#000000" aria-label="Mask solid background color">
-              <span id="maskColorHex" class="val-tag">#000000</span>
+            <div class="color-picker-group">
+              <input type="color" id="maskColorPicker" value="#000000" class="color-input">
+              <span id="maskColorHex" class="color-hex-tag">#000000</span>
             </div>
           </div>
+
           <div class="slider-group">
             <label for="maskOpacitySlider" class="control-label">
               <span>Mask Opacity</span>
               <span id="maskOpacityVal" class="val-tag">100%</span>
             </label>
-            <input type="range" id="maskOpacitySlider" min="0" max="100" step="5" value="100" aria-label="Mask opacity percentage">
+            <input type="range" id="maskOpacitySlider" min="0" max="100" step="5" value="100">
+            <small class="field-help">100% = Solid black outside (ideal for floor projection)</small>
           </div>
         </div>
       </div>
 
-      <!-- Feature 2: Motion Video Alert Settings -->
+      <!-- Motion Video Alert Settings -->
       <div class="card control-card">
         <div class="card-header">
           <span class="card-title">Motion-Triggered Video Alert</span>
@@ -324,29 +547,29 @@
 
           <div class="slider-group">
             <label for="areaThresholdSlider" class="control-label">
-              <span>Min Changed Area</span>
+              <span>Changed Area Trigger</span>
               <span id="areaThresholdVal" class="val-tag">3.0%</span>
             </label>
             <input type="range" id="areaThresholdSlider" min="0.5" max="15.0" step="0.5" value="3.0">
-            <small class="field-help">Percentage of circle zone that must change</small>
+            <small class="field-help">Minimum active zone changed to trigger alert</small>
           </div>
 
           <div class="slider-group">
             <label for="sampleIntervalSlider" class="control-label">
-              <span>Sampling Interval</span>
+              <span>Sample Interval</span>
               <span id="sampleIntervalVal" class="val-tag">150 ms</span>
             </label>
-            <input type="range" id="sampleIntervalSlider" min="100" max="500" step="25" value="150">
-            <small class="field-help">Rate of frame analysis (lower = faster response)</small>
+            <input type="range" id="sampleIntervalSlider" min="80" max="400" step="20" value="150">
+            <small class="field-help">Time between video frames analyzed</small>
           </div>
 
           <div class="slider-group">
             <label for="confirmFramesSlider" class="control-label">
-              <span>Confirm Frames</span>
+              <span>Confirmation Frames</span>
               <span id="confirmFramesVal" class="val-tag">2</span>
             </label>
-            <input type="range" id="confirmFramesSlider" min="1" max="6" step="1" value="2">
-            <small class="field-help">Consecutive frames required to trigger alert</small>
+            <input type="range" id="confirmFramesSlider" min="1" max="5" step="1" value="2">
+            <small class="field-help">Consecutive frames required before triggering</small>
           </div>
 
           <div class="slider-group">

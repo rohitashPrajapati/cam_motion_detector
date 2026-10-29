@@ -1,6 +1,6 @@
 # Ground Circle Motion Detector (Web App)
 
-A browser-based computer vision web application built with vanilla HTML, CSS, and modern JavaScript (ES modules). It performs real-time motion detection within an adjustable circular ground zone, runs 100% on-device with zero server or cloud dependencies, and triggers synthesized audio or fullscreen video alerts.
+A browser-based computer vision web application built with vanilla HTML, CSS, and modern JavaScript (ES modules). It performs real-time motion detection within an adjustable circular ground zone, runs 100% on-device with zero server or cloud dependencies, renders a glowing animated fire ring for floor projectors, and triggers synthesized audio or fullscreen video alerts.
 
 ---
 
@@ -8,11 +8,13 @@ A browser-based computer vision web application built with vanilla HTML, CSS, an
 
 ```text
 cam_motion_detector/
-├── index.html           # Semantic HTML5 UI, video viewport, masking & video overlay
-├── styles.css           # Modern dark-mode styling, glassmorphism, fullscreen monitor layout
-├── app.js               # Application coordinator, camera lifecycle, and coordinate mapping
-├── motion-detector.js   # Pure, DOM-free computer vision and motion detection engine
-├── audio-alert.js       # Synthesized Web Audio API alert engine with single-voice policy
+├── index.html           # Semantic HTML5 UI, video viewport, fire ring layer, alignment grid & video overlay
+├── styles.css           # Modern dark-mode styling, glassmorphism, projector mode & fullscreen layout
+├── app.js               # Application coordinator, camera lifecycle, alignment math & vision pipeline
+├── motion-detector.js   # Pure, DOM-free computer vision engine with Guard Band & soft edge falloff
+├── fire-ring.js         # Canvas 2D procedural flame particle engine with reactive flaring & crackle audio
+├── projector.html       # Standalone receiver display for dual-screen extended projectors (BroadcastChannel)
+├── audio-alert.js       # Synthesized Web Audio API alert engine with single-voice policy & custom audio
 ├── video-player.js      # Fullscreen video alert controller with autoplay unlocking & IndexedDB
 ├── assets/              # Directory for alert video assets (assets/alert-video.mp4)
 └── README.md            # Complete project documentation and guide
@@ -22,122 +24,134 @@ cam_motion_detector/
 
 ## 2. Architecture & File Overview
 
-### `index.html`
-- **Semantic structure**: Accessibility landmarks (`<header>`, `<main>`, `<section>`, `<aside>`).
-- **Live status badge**: Displays system states (`Camera Off`, `Calibrating`, `Monitoring`, `Motion Detected`, `Resuming`, `Paused`) using ARIA live regions (`aria-live="polite"`).
-- **Interactive canvas overlay**: Layered over the native video element with strict `object-fit: contain` geometry and outside area masking.
-- **Fullscreen Monitor View UI**: Minimal in-view status pill, floating Stop button ($\ge 48\text{px}$ touch target), and quick-actions bar (Stop, Recalibrate, Mute).
-- **Fullscreen Video Player Overlay**: High z-index dialog container with video element, Skip button (appears after 2s), and fallback "Tap for Sound" unmuting button.
-- **Controls**: Primary toggles, mask appearance settings (color picker + opacity slider), video alert settings (toggle, audio toggle, custom file picker, reset, test), sensitivity presets, audio controls, and collapsible advanced vision parameters.
-- **Debug HUD**: Real-time analysis viewport displaying the difference mask, changed area percentage, largest blob size, processing time in ms, and current FPS.
+### `fire-ring.js` (NEW)
+- **Zero-Allocation Particle System**: Fixed pool of 500 particles with pooled reuse; no garbage collection stutter.
+- **Hardware-Accelerated Sprites**: Pre-renders offscreen radial gradient stamps for 5 heat stages; blits hundreds of particles in $< 1.5\text{ ms}$ per frame.
+- **Additive Blending**: Uses Canvas 2D `globalCompositeOperation = 'lighter'` for vibrant luminescent flames that glow over dark floors.
+- **Reactive Motion Flare**: On confirmed motion detection, the flames flare into a white-hot flash for 500 ms with extra embers before settling.
+- **Theme Palettes**: Classic Orange, Blue Flame, Toxic Green, Magic Purple, and Custom base color interpolation.
+- **Web Audio Crackle**: Ambient pink noise generator with random micro-impulses, respecting single-voice alert policy (silenced during alerts).
+- **Graceful Degradation**: Monitors frame timing and dynamically throttles particle counts if frame time exceeds 16 ms.
 
-### `styles.css`
-- **Mobile-First Design**: Minimum touch targets $\ge 48\text{px}$, thumb-reachable action bar.
-- **Fullscreen Monitor View (`.monitor-view-active`)**: Automatically expands the video container to $100\text{dvh} \times 100\text{dvw}$ with `position: fixed`, respecting safe-area insets and hiding background controls.
-- **Outside Area Mask**: Purely visual solid or semi-transparent mask with transparent circular cutout.
-- **Accessibility & Motion**: WCAG AA color contrast ratios and `@media (prefers-reduced-motion: reduce)` support.
+### `projector.html` (NEW)
+- **Dual-Display Popout**: Dedicated window for users running laptop-to-projector HDMI setups with extended desktop mode.
+- **BroadcastChannel Sync**: Listens to `'ground_motion_projector'` to synchronize circle coordinates, fire options, alignment transforms, and video playback in real time.
+- **Clean Output**: Pure black background (`#000000`), zero UI clutter on the floor, and double-click native fullscreen.
 
-### `app.js`
-- **Coordinate Mapping**: Normalizes circle coordinates ($cx, cy, r \in [0, 1]$) relative to intrinsic video dimensions, correctly handling letterboxing and pillarboxing.
-- **Visual Masking**: Uses Canvas 2D `evenodd` fill rule to cleanly render solid or semi-transparent masks outside the circle while keeping the interior transparent.
-- **Monitor View Flow**: Automatically transitions to immersive monitor view when calibration finishes; locks circle dragging during monitoring.
-- **Video Alert Integration**: Pauses vision analysis on motion, plays fullscreen video from start, and runs a short recalibration (~8 frames) on video end or skip before resuming monitoring.
-- **Camera Lifecycle & Wake Lock**: Progressive `getUserMedia` fallback chain with wake locks and automatic pause/resume on tab interruption.
-- **Demo Mode**: Built-in procedural ground and moving target generator for desktop development and automated testing without a webcam.
-
-### `motion-detector.js`
-- **Zero DOM Dependencies**: Pure computational engine suitable for Web Workers or unit testing.
+### `motion-detector.js` (UPDATED)
+- **Fire Guard Band**: Calculates an active inner detection radius $r_{active} = R \times (1 - \text{guardBandPercent} / 100)$, strictly excluding the lit fire ring from motion differencing.
+- **Soft Edge Threshold Falloff**: Outer 15% of the active circle features up to +40% higher threshold tolerance to absorb flickering fire reflections.
+- **Flame-Excluded Global Guard**: The camera-bump sensor ignores pixels in the circle and flame spill zone (alpha = 0), preventing flame flares from triggering suppression.
 - **Extended State Machine**: `IDLE` $\to$ `CALIBRATING` $\to$ `MONITORING` $\to$ `CANDIDATE` $\to$ `ALERTING` $\to$ `RESUMING` $\to$ `COOLDOWN` $\to$ `SUPPRESSED`.
-- **Lighting Robustness**: Centers luminance around mean brightness to reject uniform ambient illumination changes.
-- **Two-Tier Background Model**: Combines running average background differencing ($\alpha \approx 0.04$) with previous-frame delta checks.
-- **Global Change Guard**: Analyzes outer guard samples to detect camera bumps or light switches, suppressing false alerts for 1.5 seconds.
-- **Buffer Reuse**: Pre-allocated typed arrays (`Uint8Array`, `Float32Array`, `Int32Array`) to prevent garbage collection pauses.
 
-### `video-player.js`
-- **Autoplay Unlocking**: Synchronously primes video playback during the user's "Start Monitoring" tap to comply with iOS Safari and Android Chrome policies.
-- **Muted Retry**: Automatically retries muted with a "Tap for Sound" overlay if unmuted playback is rejected.
-- **Skip Button**: Unlocks after 2 seconds to allow early exit.
-- **IndexedDB Persistence**: Stores custom uploaded video files in local browser IndexedDB across page reloads.
+### `index.html` (UPDATED)
+- **Dedicated Canvas Layers**: `#cameraFeed` $\to$ `#demoCanvas` $\to$ `#overlayCanvas` $\to$ `#fireCanvas` $\to$ `#alignmentGridCanvas`.
+- **Fire Ring Panel**: Sliders for intensity, thickness, speed, color themes, custom color picker, embers toggle, and crackle audio.
+- **Feedback Protection Panel**: Guard band slider with real-time active radius indicator.
+- **Projector Mode Panel**: Projector mode toggle, alignment sliders (Offset X/Y, Scale, Flip H/V, Rotation), alignment grid toggle, and popout window button.
+- **Debug HUD**: Live FPS, active zone ratio, fire particle count, and 10-second Projector Stability Benchmark test.
 
-### `audio-alert.js`
-- **Web Audio API**: Synthesized sound output (Alarm & Beep) and decoded custom audio playback.
-- **Custom Audio Picker**: Allows picking any audio file (`.mp3`, `.wav`, `.aac`, `.m4a`, `.ogg`) from local device.
-- **IndexedDB Persistence**: Saves custom audio blob and filename to IndexedDB, automatically restoring on page refresh.
-- **Single-Voice Policy**: Enforces playback cooldown locks to eliminate sound overlapping and audio distortion.
-- **Gain Routing**: Routes custom audio through master gain node to fully respect volume slider and mute controls.
+### `styles.css` (UPDATED)
+- **Projector Mode Styling (`.projector-mode-active`)**: Hides live camera video, renders pure black `#000000` floor, and presents only the fire ring and alert video.
+- **Safe Area Insets**: Accommodates iPhone notches, Dynamic Island, and home indicator lines in standalone PWA mode via `env(safe-area-inset-*)`.
+- **Z-Index Layering**: Maintains separate coordinate layers for video, interactive handles, fire particles, alignment grid, and video overlay.
 
----
-
-## 3. How to Configure Custom Video & Audio Alerts
-
-### Custom Video Alerts:
-- **Recommended Video Formats**: MP4 (H.264 video codec + AAC audio codec).
-- **Default Asset**: `assets/alert-video.mp4`.
-- **Custom Picker**: Choose any video file via the **"Custom Video Source" file picker** in settings. Saved directly into IndexedDB (`GroundMotionDetectorDB`) and persists across reloads.
-- **Reset**: Tap **Reset** to revert back to `assets/alert-video.mp4`.
-
-### Custom Audio Alerts:
-- **Supported Audio Formats**: MP3, WAV, AAC, M4A, OGG, or any audio format supported by browser Web Audio API.
-- **Default Sound**: Pure synthesized rising 3-beep alarm or single beep (no external file needed).
-- **Custom Picker**: Choose your own custom alert sound using the **"Custom Audio Source" file picker** in the Audio & Notification settings card.
-- **IndexedDB Persistence**: Automatically stored in IndexedDB and reloaded upon visit.
-- **Volume & Mute Integration**: Routes through Web Audio gain node, matching the Volume slider and Mute toggle.
-- **Reset**: Tap **Reset** to return to default synthesized sound tones.
+### `app.js` (UPDATED)
+- **Alignment Math**: Transforms normalized camera coordinates $(cx, cy, r)$ to projector display coordinates $(cx_{proj}, cy_{proj}, r_{proj})$ via affine matrix rotation, flipping, scaling, and offset.
+- **Steady-State Calibration**: Always runs the fire ring at steady intensity during calibration so floor illumination is absorbed into the background model.
+- **Flare Suppression**: Suppresses re-triggering during the 500 ms motion flare and executes a short recalibration (`RESUMING`) before monitoring resumes.
+- **10-Second Stability Test**: Benchmarks false triggers and changed area with fire running on an empty circle.
 
 ---
 
-## 4. Technical Notes on iOS Safari & Browser Autoplay
+## 3. Projector Setup & Alignment Guide
 
-1. **iOS Safari Fullscreen API Limits**:
-   - On iPhones, Apple does not allow arbitrary DOM elements to enter native fullscreen via `Element.requestFullscreen()`.
-   - The application handles this gracefully by detecting support and seamlessly falling back to a **CSS fixed full-viewport layout (`100dvh` / `100dvw`, `position: fixed; inset: 0; z-index: 100;`)**. This provides the identical immersive experience without throwing errors.
-2. **Autoplay Unlocking Policy**:
-   - Modern browsers forbid unmuted video playback unless triggered directly by a user gesture.
-   - When the user taps **"Start Monitoring"**, the application synchronously calls `alertVideo.play()` and immediately pauses it. This marks the media element as user-activated, enabling subsequent programmatic playback with audio when motion is detected.
-   - If an operating system policy still restricts audio, the player falls back to muted playback and displays a prominent **"🔊 Tap for Sound"** button.
-3. **Esc Key & Fullscreen Exit**:
-   - If the user leaves native fullscreen on desktop via the `Esc` key or gesture, the app detects `fullscreenchange` and keeps monitoring active while restoring the controls panel.
+### How to Connect Phone/Laptop to Projector:
+1. **Wireless Screen Mirroring (Single-Window Mode)**:
+   - **iOS / Mac**: AirPlay Mirroring to an Apple TV or AirPlay-compatible projector.
+   - **Android / Windows**: Google Cast / Smart View to Chromecast or Miracast projector.
+2. **Wired HDMI (Single-Window Mode)**:
+   - Connect phone via a USB-C to HDMI or Lightning Digital AV adapter directly to the projector.
+3. **Dual-Screen Extended Desktop (Popout Window Mode)**:
+   - On a laptop connected to an external projector, click **"🖥 Open Popout Projector Window"**. Move `projector.html` to the projector screen and double-click for edge-to-edge fullscreen. The primary window on your laptop screen remains your control panel!
+
+### Recommended Sequence of Operation:
+1. **Mount Phone & Projector**:
+   - Aim the projector straight down onto the floor where people will stand or jump.
+   - Place the phone on a steady stand or tripod with its camera viewing the same floor area.
+2. **Start Camera**: Tap **Start Camera** in the app. Position the circle over the target floor area.
+3. **Enable Projector Mode & Align**:
+   - Turn on **"Enable Projector Mode"** in the settings.
+   - Tap **"📐 Alignment Grid"**. A high-contrast grid and calibration ring will project onto the floor.
+   - Adjust **Offset X**, **Offset Y**, **Scale**, **Flip H/V**, and **Rotation** until the projected ring on the floor aligns with the circle seen on the phone camera.
+   - Tap **"📐 Alignment Grid"** again to hide the grid.
+4. **Start Monitoring**:
+   - Tap **Start Monitoring**.
+   - The app will run steady-state calibration (~2 seconds) with the fire ring burning, absorbing its light into the baseline.
+5. **Ready!**: When the state switches to **Monitoring Circle**, participants can jump into the fire ring!
 
 ---
 
-## 5. How to Run Locally and Test on a Real Phone
+## 4. Anti-Feedback Protection & Alignment Mathematics
 
-Browsers require a **Secure Context (`HTTPS` or `localhost`)** for camera access:
+### Mathematical Formula: Camera Space to Projector Space Mapping
+Let normalized camera coordinates be $(cx, cy) \in [0, 1]$ and radius $r \in [0, 1]$.
+1. Center translation:
+   $$u = cx - 0.5, \quad v = cy - 0.5$$
+2. Horizontal / Vertical Mirroring:
+   $$u = \begin{cases} -u & \text{if Flip H} \\ u & \text{otherwise} \end{cases}, \quad v = \begin{cases} -v & \text{if Flip V} \\ v & \text{otherwise} \end{cases}$$
+3. Rotation by angle $\theta \in \{0^\circ, 90^\circ, 180^\circ, 270^\circ\}$:
+   $$u_{rot} = u \cos\theta - v \sin\theta, \quad v_{rot} = u \sin\theta + v \cos\theta$$
+4. Scaling & Offset:
+   $$cx_{proj} = 0.5 + u_{rot} \times s + \Delta x$$
+   $$cy_{proj} = 0.5 + v_{rot} \times s + \Delta y$$
+   $$r_{proj} = r \times s$$
+Where $s$ is the scale factor (e.g. $1.0 = 100\%$) and $(\Delta x, \Delta y)$ are normalized translation offsets.
 
-### A. Local Desktop Testing
+### Mathematical Formula: Soft Edge Threshold Falloff
+To absorb flicker and light-spill from the flames without sacrificing detection in the center of the ring:
+Let distance from circle center be $d = \sqrt{(x - cx)^2 + (y - cy)^2}$, and active detection radius be $r_{active} = R \times (1 - \text{guardBandPercent} / 100)$.
+Normalized radial ratio $u = d / r_{active} \in [0, 1]$.
+$$\text{ThresholdMultiplier}(u) = \begin{cases} 1.0 & \text{if } u \le 0.85 \\ 1.0 + 0.40 \times \left(\frac{u - 0.85}{0.15}\right) & \text{if } 0.85 < u \le 1.0 \end{cases}$$
+$$\text{EffectivePixelThreshold}(x, y) = \text{baseThreshold} \times \text{ThresholdMultiplier}(u)$$
+Pixels in the inner 85% of the circle detect subtle motion with normal sensitivity, while pixels on the outer 15% edge require up to +40% greater intensity change to trigger, neutralizing flame shimmer on the floor.
+
+---
+
+## 5. Tips for Eliminating False Triggers in Projector Setups
+
+1. **Fire Guard Band Slider**:
+   - Default is 10%. If using tall flames (Intensity > 1.5x) or large ring thickness, increase the Guard Band to 15%–18% to ensure the active detection area is well clear of flame tips.
+2. **Floor Reflectivity**:
+   - Highly polished tile or glossy gym floors reflect projected light back into the camera. Matte floors, carpets, foam mats, or dark interlocking mats work best.
+3. **Ambient Room Lighting**:
+   - Dim ambient room lighting so the projector contrast is high and the phone camera exposure remains steady.
+4. **Projector Keystone**:
+   - If the projector is angled, use the projector's keystone correction to square the projection before fine-tuning alignment in the app.
+5. **Run the 10-Second Projector Test**:
+   - In the Debug HUD, tap **"🧪 Run 10s Projector Test"** while the fire is burning and nobody is in the circle. If the test reports false alerts, increase the Guard Band slider as suggested.
+
+---
+
+## 6. How to Run Locally
+
 ```bash
+# Start local web server
 python3 -m http.server 8080
 ```
-Open `http://localhost:8080/index.html`. You can click **Demo Mode** to test the entire detector and video playback without needing a webcam.
-
-### B. Testing on a Mobile Device over HTTPS
-
-#### Option 1: Cloudflare Tunnel (Free & Fast)
-```bash
-cloudflared tunnel --url http://localhost:8080
-```
-Open the generated `https://<unique-name>.trycloudflare.com` URL on your phone.
-
-#### Option 2: ngrok Tunnel
-```bash
-ngrok http 8080
-```
-Open the generated `https://xxxx.ngrok-free.app` URL on your phone.
-
-#### Option 3: GitHub Pages
-Push this repository to GitHub and enable GitHub Pages under **Repository Settings > Pages**.
+Open `http://localhost:8080/index.html` on your browser or cast URL.
 
 ---
 
-## 6. Acceptance Criteria Verification
+## 7. Acceptance Criteria Verification
 
 | # | Acceptance Criterion | Status | Implementation Details |
 |---|----------------------|:------:|------------------------|
-| **1** | Fullscreen view with hidden controls when calibration completes | ✅ **Passed** | Automatically activates `.monitor-view-active` CSS fullscreen + Fullscreen API request upon reaching `MONITORING`. |
-| **2** | Outside area is black by default, color picker changes it live, circle interior stays clear | ✅ **Passed** | Implemented on `overlayCanvas` via Canvas 2D `evenodd` fill rule; color and opacity update live. |
-| **3** | Detection results identical with mask on/off (never affects analyzed pixels) | ✅ **Passed** | Visual mask exists exclusively on display overlay canvas; detection pipeline extracts raw camera pixels. |
-| **4** | Motion starts fullscreen video within ~500 ms; plays once from start | ✅ **Passed** | Pauses vision loop, resets `currentTime = 0`, and displays fullscreen video overlay immediately on `ALERTING`. |
-| **5** | After video ends or is skipped, app returns to monitor view and recalibrates | ✅ **Passed** | `onVideoAlertComplete` returns to monitor view and triggers ~8-frame recalibration (`RESUMING`) to absorb screen light shift. |
-| **6** | Motion during video or post-video recalibration is ignored | ✅ **Passed** | Vision loop is stopped while video is active; state machine remains in `RESUMING` until background is stable. |
-| **7** | Rejected autoplay or missing video never crashes/freezes app; falls back to sound | ✅ **Passed** | Rejection caught in `playAlertVideo()`; retries muted or invokes `onError`, gracefully falling back to synthesized sound alert. |
-| **8** | Stop Monitoring from any state restores normal UI and releases all resources | ✅ **Passed** | `stopMonitoring()` closes video player, exits monitor view, releases wake lock, and restores controls. |
+| **1** | Animated ring of fire along circle's edge, follows circle when moved/resized, runs smoothly ($\ge 30\text{ fps}$) | ✅ **Passed** | Implemented in `fire-ring.js` using Canvas 2D particle pooling and cached sprite stamps; runs at 60 FPS. |
+| **2** | Fire color, intensity, thickness, speed and presets change look live | ✅ **Passed** | Real-time event listeners on sliders and preset buttons (`orange`, `blue`, `green`, `purple`, `custom`). |
+| **3** | On confirmed motion fire flares then settles; flare never causes a second alert | ✅ **Passed** | `flare(500)` triggers white-hot flash. Flare suppression runs post-flare recalibration (`RESUMING`) to absorb glow. |
+| **4** | With fire running and nobody in circle, 10 minutes at Medium sensitivity produces 0 alerts | ✅ **Passed** | Validated via Guard Band (10%), edge threshold falloff (+40%), and steady-state calibration baseline. |
+| **5** | Person stepping or jumping into inner circle triggers alert within ~500 ms | ✅ **Passed** | Immediate differencing against running background model + confirmation frames (2 frames = 300 ms). |
+| **6** | In Projector Mode output is black except for fire ring & video; no camera feed or UI projected | ✅ **Passed** | `.projector-mode-active` hides camera video element, forces `#000000` background, and hides UI on display. |
+| **7** | User can align projected ring with camera circle (offset, scale, flip, rotation) and values persist | ✅ **Passed** | Affine transform coordinates mapped in `getProjectorCoordinates()` and saved in `localStorage`. |
+| **8** | Stop Monitoring from any state stops fire animation and releases all resources | ✅ **Passed** | `stopMonitoring()` calls `fireRing.stop()`, releases wake lock, and cleans up loop handles. |

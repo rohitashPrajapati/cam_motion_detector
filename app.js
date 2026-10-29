@@ -2,13 +2,23 @@
  * app.js
  * 
  * Main Application Controller for Ground Motion Detector.
- * Manages Camera Lifecycle, Coordinate Mapping, Detection Loop, Fullscreen Monitor View,
- * Outside Area Masking, Video Player Integration, and Demo Mode.
+ * Features:
+ * - Camera Lifecycle & Wake Lock management
+ * - Coordinate Mapping (Intrinsic Video <-> Display Viewport)
+ * - Pure DOM-free Computer Vision pipeline coordination
+ * - Feature 1: Animated Fire Ring Effect (Canvas 2D particle/flame engine)
+ * - Feature 2: Anti-Feedback Protection (Guard Band, soft threshold falloff, flame exclusion)
+ * - Feature 3: Projector Mode & Camera-to-Projector Alignment (offset, scale, flips, rotation, grid)
+ * - Secondary Projector Window synchronization via BroadcastChannel
+ * - 10-second Projector Stability Benchmark
+ * - Fullscreen Monitor View & Motion-triggered Video Alerts
+ * - Custom Video & Audio file pickers with IndexedDB persistence
  */
 
 import { MotionDetector, EngineState, SENSITIVITY_PRESETS } from './motion-detector.js';
 import { AudioAlert } from './audio-alert.js';
 import { VideoAlertPlayer } from './video-player.js';
+import { FireRing } from './fire-ring.js';
 
 // Application State
 const state = {
@@ -24,17 +34,44 @@ const state = {
   debugEnabled: false,
   sampleIntervalMs: 150,
 
-  // Feature 1: Outside Mask Configuration
+  // Mask Configuration
   maskColor: '#000000',
-  maskOpacity: 1.0, // 0.0 to 1.0
+  maskOpacity: 1.0,
 
-  // Feature 2: Video Alert Configuration
+  // Video Alert Configuration
   isVideoOnMotion: true,
   isVideoAudio: true,
   isVideoPlaying: false,
 
+  // Feature 1: Fire Ring Configuration
+  isFireEnabled: true,
+  fireIntensity: 2.5,
+  fireThickness: 32,
+  fireSpeed: 1.0,
+  fireTheme: 'orange',
+  fireCustomColor: '#ff4500',
+  fireEmbers: true,
+  fireGlow: true,
+  fireCrackle: true,
+  fireCrackleVolume: 0.6,
+
+  // Feature 2: Feedback-Loop Protection & Guard Band
+  guardBandPercent: 10,
+  isProjectorTesting: false,
+
+  // Feature 3: Projector Mode & Alignment
+  isProjectorMode: false,
+  isAlignmentGridVisible: false,
+  alignment: {
+    offsetX: 0,
+    offsetY: 0,
+    scale: 1.0,
+    flipH: false,
+    flipV: false,
+    rotation: 0
+  },
+
   // Zone coordinates: NORMALIZED (0.0 to 1.0) relative to intrinsic video dimensions
-  // r is normalized to Math.min(videoWidth, videoHeight)
   zone: {
     cx: 0.5,
     cy: 0.5,
@@ -59,13 +96,16 @@ const state = {
   initialPinchRadius: 0,
 
   // Monitor view quick bar auto-hide timer
-  quickBarTimer: null
+  quickBarTimer: null,
+  projectorWindowRef: null
 };
 
 // Sub-modules
-const detector = new MotionDetector();
+const detector = new MotionDetector({ guardBandPercent: state.guardBandPercent });
 const audioAlert = new AudioAlert();
 let videoPlayer = null;
+let fireRing = null;
+const projectorChannel = new BroadcastChannel('ground_motion_projector');
 
 // DOM Element References
 const dom = {
@@ -79,6 +119,8 @@ const dom = {
   cameraFeed: document.getElementById('cameraFeed'),
   demoCanvas: document.getElementById('demoCanvas'),
   overlayCanvas: document.getElementById('overlayCanvas'),
+  fireCanvas: document.getElementById('fireCanvas'),
+  alignmentGridCanvas: document.getElementById('alignmentGridCanvas'),
   videoContainer: document.getElementById('videoContainer'),
   emptyCameraState: document.getElementById('emptyCameraState'),
   zoneHelperPill: document.getElementById('zoneHelperPill'),
@@ -107,39 +149,80 @@ const dom = {
   debugBlobVal: document.getElementById('debugBlobVal'),
   debugTimeVal: document.getElementById('debugTimeVal'),
   debugStateVal: document.getElementById('debugStateVal'),
+  debugFireFpsVal: document.getElementById('debugFireFpsVal'),
+  debugActiveRadiusVal: document.getElementById('debugActiveRadiusVal'),
+  btnProjectorTest: document.getElementById('btnProjectorTest'),
+  projectorTestResult: document.getElementById('projectorTestResult'),
 
   // Header & Status
   statusBadge: document.getElementById('statusBadge'),
-  statusIcon: document.getElementById('statusIcon'),
   statusText: document.getElementById('statusText'),
   alertBanner: document.getElementById('alertBanner'),
   alertTimestamp: document.getElementById('alertTimestamp'),
 
   // Primary Action Buttons
-  btnToggleCamera: document.getElementById('btnToggleCamera'),
-  labelToggleCamera: document.getElementById('labelToggleCamera'),
-  btnToggleMonitoring: document.getElementById('btnToggleMonitoring'),
-  labelToggleMonitoring: document.getElementById('labelToggleMonitoring'),
-  btnSwitchCamera: document.getElementById('btnSwitchCamera'),
-  btnDemoMode: document.getElementById('btnDemoMode'),
-  labelDemoMode: document.getElementById('labelDemoMode'),
+  btnStartCamera: document.getElementById('btnStartCamera'),
+  btnMonitor: document.getElementById('btnMonitor'),
+  btnDemo: document.getElementById('btnDemo'),
   emptyStartBtn: document.getElementById('emptyStartBtn'),
   emptyDemoBtn: document.getElementById('emptyDemoBtn'),
 
   // Zone Controls
   btnRecalibrate: document.getElementById('btnRecalibrate'),
   btnResetZone: document.getElementById('btnResetZone'),
-  circleRadiusSlider: document.getElementById('circleRadiusSlider'),
-  circleRadiusVal: document.getElementById('circleRadiusVal'),
+  zoneSizeSlider: document.getElementById('zoneSizeSlider'),
+  zoneSizeVal: document.getElementById('zoneSizeVal'),
 
-  // Feature 1: Mask Controls
+  // Feature 1: Fire Ring Controls
+  fireRingToggle: document.getElementById('fireRingToggle'),
+  fireIntensitySlider: document.getElementById('fireIntensitySlider'),
+  fireIntensityVal: document.getElementById('fireIntensityVal'),
+  fireThicknessSlider: document.getElementById('fireThicknessSlider'),
+  fireThicknessVal: document.getElementById('fireThicknessVal'),
+  fireSpeedSlider: document.getElementById('fireSpeedSlider'),
+  fireSpeedVal: document.getElementById('fireSpeedVal'),
+  firePresets: {
+    orange: document.getElementById('presetFireOrange'),
+    blue: document.getElementById('presetFireBlue'),
+    green: document.getElementById('presetFireGreen'),
+    purple: document.getElementById('presetFirePurple')
+  },
+  fireCustomColorPicker: document.getElementById('fireCustomColorPicker'),
+  fireCustomColorHex: document.getElementById('fireCustomColorHex'),
+  fireEmbersToggle: document.getElementById('fireEmbersToggle'),
+  fireGlowToggle: document.getElementById('fireGlowToggle'),
+  fireCrackleToggle: document.getElementById('fireCrackleToggle'),
+  crackleVolumeGroup: document.getElementById('crackleVolumeGroup'),
+  fireCrackleVolumeSlider: document.getElementById('fireCrackleVolumeSlider'),
+  fireCrackleVolumeVal: document.getElementById('fireCrackleVolumeVal'),
+
+  // Feature 2: Feedback-Loop Protection Controls
+  guardBandSlider: document.getElementById('guardBandSlider'),
+  guardBandVal: document.getElementById('guardBandVal'),
+
+  // Feature 3: Projector Mode & Alignment Controls
+  projectorModeToggle: document.getElementById('projectorModeToggle'),
+  btnToggleAlignmentGrid: document.getElementById('btnToggleAlignmentGrid'),
+  btnResetAlignment: document.getElementById('btnResetAlignment'),
+  btnOpenProjectorWindow: document.getElementById('btnOpenProjectorWindow'),
+  projectorOffsetXSlider: document.getElementById('projectorOffsetXSlider'),
+  projectorOffsetXVal: document.getElementById('projectorOffsetXVal'),
+  projectorOffsetYSlider: document.getElementById('projectorOffsetYSlider'),
+  projectorOffsetYVal: document.getElementById('projectorOffsetYVal'),
+  projectorScaleSlider: document.getElementById('projectorScaleSlider'),
+  projectorScaleVal: document.getElementById('projectorScaleVal'),
+  projectorFlipHToggle: document.getElementById('projectorFlipHToggle'),
+  projectorFlipVToggle: document.getElementById('projectorFlipVToggle'),
+  projectorRotationSelect: document.getElementById('projectorRotationSelect'),
+
+  // Mask Controls
   maskColorPicker: document.getElementById('maskColorPicker'),
   maskColorHex: document.getElementById('maskColorHex'),
   maskOpacitySlider: document.getElementById('maskOpacitySlider'),
   maskOpacityVal: document.getElementById('maskOpacityVal'),
   btnResetMask: document.getElementById('btnResetMask'),
 
-  // Feature 2: Video Alert Settings
+  // Video Alert Settings
   videoOnMotionToggle: document.getElementById('videoOnMotionToggle'),
   videoAudioToggle: document.getElementById('videoAudioToggle'),
   videoFileInput: document.getElementById('videoFileInput'),
@@ -184,33 +267,27 @@ const dom = {
   toastContainer: document.getElementById('toastContainer')
 };
 
-// Canvas 2D Contexts with willReadFrequently optimization
+// Canvas 2D Contexts
 const overlayCtx = dom.overlayCanvas.getContext('2d');
+const alignmentGridCtx = dom.alignmentGridCanvas ? dom.alignmentGridCanvas.getContext('2d') : null;
+const demoCtx = dom.demoCanvas.getContext('2d');
 const procCtx = dom.processingCanvas.getContext('2d', { willReadFrequently: true });
 const guardCtx = dom.guardCanvas.getContext('2d', { willReadFrequently: true });
 const debugMaskCtx = dom.debugMaskCanvas.getContext('2d');
-const demoCtx = dom.demoCanvas.getContext('2d');
-
-// Image data cache for debug mask rendering
 let debugImageData = null;
 
-// Demo Mode Animation State
-let demoAnim = {
-  x: 0.1,
-  y: 0.5,
-  vx: 0.003,
-  vy: 0.002,
-  size: 0.12,
-  groundNoisePattern: null
-};
+// Demo Mode variables
+let demoTargetX = 0.5;
+let demoTargetY = 0.5;
+let demoAngle = 0;
+let demoNoisePattern = null;
 
 /* =========================================================================
-   1. Coordinate Mapping & Visual Masking Pipeline
+   1. Coordinate Mapping & Geometry Helpers
    ========================================================================= */
 
 /**
- * Calculates the exact rendered video rectangle inside the container,
- * accounting for `object-fit: contain` letterboxing / pillarboxing.
+ * Calculates current letterboxed/pillarboxed video rendering rectangle.
  */
 function getVideoRenderRect() {
   const containerW = dom.videoContainer.clientWidth;
@@ -220,31 +297,33 @@ function getVideoRenderRect() {
   let intrinsicH = 720;
 
   if (state.isDemoMode) {
-    intrinsicW = 1280;
-    intrinsicH = 720;
+    intrinsicW = dom.demoCanvas.width;
+    intrinsicH = dom.demoCanvas.height;
   } else if (dom.cameraFeed.videoWidth && dom.cameraFeed.videoHeight) {
     intrinsicW = dom.cameraFeed.videoWidth;
     intrinsicH = dom.cameraFeed.videoHeight;
   }
 
-  const containerAspect = containerW / (containerH || 1);
-  const videoAspect = intrinsicW / (intrinsicH || 1);
+  const containerAspect = containerW / containerH;
+  const videoAspect = intrinsicW / intrinsicH;
 
   let renderW, renderH, offsetX, offsetY;
 
   if (containerAspect > videoAspect) {
-    // Pillarboxed (black bars on left and right)
+    // Pillarboxed (bars on left/right)
     renderH = containerH;
     renderW = containerH * videoAspect;
     offsetX = (containerW - renderW) / 2;
     offsetY = 0;
   } else {
-    // Letterboxed (black bars on top and bottom)
+    // Letterboxed (bars on top/bottom)
     renderW = containerW;
     renderH = containerW / videoAspect;
     offsetX = 0;
     offsetY = (containerH - renderH) / 2;
   }
+
+  const minDim = Math.min(renderW, renderH);
 
   return {
     left: offsetX,
@@ -253,14 +332,40 @@ function getVideoRenderRect() {
     height: renderH,
     containerW,
     containerH,
+    minDim,
     intrinsicW,
-    intrinsicH,
-    minDim: Math.min(renderW, renderH)
+    intrinsicH
   };
 }
 
 /**
- * Resize and scale the overlay canvas to match physical display pixels.
+ * Maps normalized camera circle coordinates to projector display coordinates
+ * using offset, scale, flips, and rotation.
+ */
+function getProjectorCoordinates(normCx, normCy, normR) {
+  const align = state.alignment;
+  let u = normCx - 0.5;
+  let v = normCy - 0.5;
+
+  if (align.flipH) u = -u;
+  if (align.flipV) v = -v;
+
+  const rad = (align.rotation || 0) * (Math.PI / 180);
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const rx = u * cos - v * sin;
+  const ry = u * sin + v * cos;
+
+  const scale = align.scale || 1.0;
+  const finalCx = 0.5 + rx * scale + (align.offsetX || 0);
+  const finalCy = 0.5 + ry * scale + (align.offsetY || 0);
+  const finalR = normR * scale;
+
+  return { cx: finalCx, cy: finalCy, r: finalR };
+}
+
+/**
+ * Resize and scale canvases to physical display pixels.
  */
 function resizeOverlayCanvas() {
   const dpr = window.devicePixelRatio || 1;
@@ -275,6 +380,26 @@ function resizeOverlayCanvas() {
     dom.overlayCanvas.style.height = `${h}px`;
     overlayCtx.scale(dpr, dpr);
   }
+
+  if (dom.fireCanvas && (dom.fireCanvas.width !== w * dpr || dom.fireCanvas.height !== h * dpr)) {
+    dom.fireCanvas.width = w * dpr;
+    dom.fireCanvas.height = h * dpr;
+    dom.fireCanvas.style.width = `${w}px`;
+    dom.fireCanvas.style.height = `${h}px`;
+    if (fireRing) {
+      fireRing.resize(w * dpr, h * dpr);
+    }
+  }
+
+  if (dom.alignmentGridCanvas && (dom.alignmentGridCanvas.width !== w * dpr || dom.alignmentGridCanvas.height !== h * dpr)) {
+    dom.alignmentGridCanvas.width = w * dpr;
+    dom.alignmentGridCanvas.height = h * dpr;
+    dom.alignmentGridCanvas.style.width = `${w}px`;
+    dom.alignmentGridCanvas.style.height = `${h}px`;
+    if (state.isAlignmentGridVisible) {
+      drawAlignmentGrid();
+    }
+  }
 }
 
 /**
@@ -288,22 +413,15 @@ function clampZoneCoordinates() {
   const rNormX = rPixels / rect.intrinsicW;
   const rNormY = rPixels / rect.intrinsicH;
 
-  // Clamp radius
   state.zone.r = Math.max(0.08, Math.min(0.42, state.zone.r));
-
-  // Clamp center
   state.zone.cx = Math.max(rNormX, Math.min(1 - rNormX, state.zone.cx));
   state.zone.cy = Math.max(rNormY, Math.min(1 - rNormY, state.zone.cy));
 
-  // Update radius slider UI
   const radiusPct = Math.round(state.zone.r * 100);
-  dom.circleRadiusSlider.value = radiusPct;
-  dom.circleRadiusVal.textContent = `${radiusPct}%`;
+  dom.zoneSizeSlider.value = radiusPct;
+  dom.zoneSizeVal.textContent = `${radiusPct}%`;
 }
 
-/**
- * Convert Hex Color and Opacity to CSS RGBA string.
- */
 function hexToRgba(hex, opacity) {
   let cleanHex = hex.replace('#', '');
   if (cleanHex.length === 3) {
@@ -316,9 +434,38 @@ function hexToRgba(hex, opacity) {
   return `rgba(${r}, ${g}, ${b}, ${opacity})`;
 }
 
+/* =========================================================================
+   2. BroadcastChannel Projector Synchronization
+   ========================================================================= */
+
+function broadcastProjectorSync() {
+  try {
+    projectorChannel.postMessage({
+      type: 'sync',
+      circle: { cx: state.zone.cx, cy: state.zone.cy, r: state.zone.r },
+      alignment: state.alignment,
+      fireOptions: {
+        enabled: state.isFireEnabled,
+        intensity: state.fireIntensity,
+        thickness: state.fireThickness,
+        speed: state.fireSpeed,
+        theme: state.fireTheme,
+        customColor: state.fireCustomColor,
+        embersEnabled: state.fireEmbers,
+        interiorGlow: state.fireGlow
+      }
+    });
+  } catch (err) {
+    // Ignore channel closed errors
+  }
+}
+
+/* =========================================================================
+   3. Drawing Overlays & Fire Ring Positioning
+   ========================================================================= */
+
 /**
  * Render the interactive circular zone overlay AND Feature 1 Outside Area Mask.
- * Uses canvas even-odd fill rule to cut out the circle interior cleanly.
  */
 function drawOverlay(engineStatus = detector.state, changedPercent = 0) {
   const rect = getVideoRenderRect();
@@ -331,55 +478,77 @@ function drawOverlay(engineStatus = detector.state, changedPercent = 0) {
 
   if (!state.isCameraActive && !state.isDemoMode) {
     overlayCtx.restore();
+    if (fireRing) fireRing.setCircle(0, 0, 0);
     return;
   }
 
-  // Calculate pixel position of zone
+  // Camera space pixel position
   const screenCx = rect.left + state.zone.cx * rect.width;
   const screenCy = rect.top + state.zone.cy * rect.height;
   const screenR = state.zone.r * rect.minDim;
 
-  // -------------------------------------------------------------
-  // Feature 1: Solid Outside Masking with transparent circle hole
-  // -------------------------------------------------------------
-  if (state.maskOpacity > 0) {
+  // Update Fire Ring position (applies projector alignment in Projector Mode)
+  if (fireRing) {
+    if (state.isProjectorMode) {
+      const proj = getProjectorCoordinates(state.zone.cx, state.zone.cy, state.zone.r);
+      const fireCx = (rect.left + proj.cx * rect.width) * dpr;
+      const fireCy = (rect.top + proj.cy * rect.height) * dpr;
+      const fireR = (proj.r * rect.minDim) * dpr;
+      fireRing.setCircle(fireCx, fireCy, fireR);
+    } else {
+      fireRing.setCircle(screenCx * dpr, screenCy * dpr, screenR * dpr);
+    }
+    fireRing.setState(engineStatus);
+  }
+
+  broadcastProjectorSync();
+
+  // Outside Masking with transparent hole (In Projector Mode, always solid black)
+  const effMaskColor = state.isProjectorMode ? '#000000' : state.maskColor;
+  const effMaskOpacity = state.isProjectorMode ? 1.0 : state.maskOpacity;
+
+  if (effMaskOpacity > 0) {
     overlayCtx.save();
     overlayCtx.beginPath();
-    // Outer canvas boundary
     overlayCtx.rect(0, 0, rect.containerW, rect.containerH);
-    // Inner circular hole cutout (counter-clockwise)
     overlayCtx.arc(screenCx, screenCy, Math.max(0, screenR), 0, Math.PI * 2, true);
-    overlayCtx.fillStyle = hexToRgba(state.maskColor, state.maskOpacity);
+    overlayCtx.fillStyle = hexToRgba(effMaskColor, effMaskOpacity);
     overlayCtx.fill('evenodd');
     overlayCtx.restore();
   }
 
-  // Determine stroke color and theme based on engine state
-  let strokeColor = '#06b6d4'; // Cyan default (Idle)
+  // In Projector Mode, skip drawing UI strokes/handles onto the floor
+  if (state.isProjectorMode && state.isMonitorView) {
+    overlayCtx.restore();
+    return;
+  }
+
+  // Determine circle border color based on status
+  let strokeColor = '#06b6d4'; // Cyan default
   let fillColor = 'rgba(6, 182, 212, 0.04)';
   let glowColor = 'rgba(6, 182, 212, 0.3)';
 
   if (state.isMonitoring) {
     if (engineStatus === EngineState.ALERTING || state.isVideoPlaying) {
-      strokeColor = '#ef4444'; // Crimson (Motion Detected / Video Playing)
+      strokeColor = '#ef4444';
       fillColor = 'rgba(239, 68, 68, 0.22)';
       glowColor = 'rgba(239, 68, 68, 0.7)';
     } else if (engineStatus === EngineState.CALIBRATING || engineStatus === EngineState.RESUMING) {
-      strokeColor = '#f59e0b'; // Amber (Calibrating / Resuming)
+      strokeColor = '#f59e0b';
       fillColor = 'rgba(245, 158, 11, 0.08)';
       glowColor = 'rgba(245, 158, 11, 0.4)';
     } else if (engineStatus === EngineState.SUPPRESSED) {
-      strokeColor = '#f97316'; // Orange (Suppressed / Bump)
+      strokeColor = '#f97316';
       fillColor = 'rgba(249, 115, 22, 0.12)';
       glowColor = 'rgba(249, 115, 22, 0.5)';
     } else {
-      strokeColor = '#10b981'; // Emerald (Monitoring active)
+      strokeColor = '#10b981';
       fillColor = 'rgba(16, 185, 129, 0.06)';
       glowColor = 'rgba(16, 185, 129, 0.4)';
     }
   }
 
-  // 1. Outer Glow / Ripple if alerting
+  // Alert ripple animation
   if (engineStatus === EngineState.ALERTING || state.isVideoPlaying) {
     const pulseRadius = screenR + Math.sin(performance.now() * 0.01) * 6;
     overlayCtx.beginPath();
@@ -389,7 +558,7 @@ function drawOverlay(engineStatus = detector.state, changedPercent = 0) {
     overlayCtx.stroke();
   }
 
-  // 2. Main Circle Fill and Stroke
+  // Main Detection Circle Stroke
   overlayCtx.beginPath();
   overlayCtx.arc(screenCx, screenCy, screenR, 0, Math.PI * 2);
   overlayCtx.fillStyle = fillColor;
@@ -407,9 +576,22 @@ function drawOverlay(engineStatus = detector.state, changedPercent = 0) {
     overlayCtx.setLineDash([]);
   }
   overlayCtx.stroke();
-  overlayCtx.shadowBlur = 0; // Reset shadow
+  overlayCtx.shadowBlur = 0;
 
-  // 3. Center Crosshair Anchor (Only visible in normal setup view, hidden in monitor view for immersion)
+  // Feature 2: Debug Mode outline for Active Detection Area (Inner Circle excluding Fire Guard Band)
+  if (state.debugEnabled && state.guardBandPercent > 0) {
+    const activeR = screenR * (1 - state.guardBandPercent / 100);
+    overlayCtx.save();
+    overlayCtx.beginPath();
+    overlayCtx.arc(screenCx, screenCy, Math.max(1, activeR), 0, Math.PI * 2);
+    overlayCtx.strokeStyle = 'rgba(147, 197, 253, 0.6)';
+    overlayCtx.lineWidth = 1.5;
+    overlayCtx.setLineDash([4, 4]);
+    overlayCtx.stroke();
+    overlayCtx.restore();
+  }
+
+  // Setup mode handles (Crosshair & Radius Handle)
   if (!state.isMonitorView) {
     overlayCtx.beginPath();
     const chLen = 7;
@@ -422,7 +604,6 @@ function drawOverlay(engineStatus = detector.state, changedPercent = 0) {
     overlayCtx.setLineDash([]);
     overlayCtx.stroke();
 
-    // 4. Radius Resize Handle at Right Edge (3 o'clock)
     const handleX = screenCx + screenR;
     const handleY = screenCy;
     overlayCtx.beginPath();
@@ -432,10 +613,8 @@ function drawOverlay(engineStatus = detector.state, changedPercent = 0) {
     overlayCtx.strokeStyle = strokeColor;
     overlayCtx.lineWidth = 2;
     overlayCtx.stroke();
-  }
 
-  // 5. Zone Label Pill (In normal view)
-  if (!state.isMonitorView) {
+    // Zone status label pill
     let labelText = 'ZONE';
     if (engineStatus === EngineState.CALIBRATING) {
       labelText = 'CALIBRATING...';
@@ -449,74 +628,139 @@ function drawOverlay(engineStatus = detector.state, changedPercent = 0) {
 
     overlayCtx.font = '600 11px var(--font-sans)';
     const textWidth = overlayCtx.measureText(labelText).width;
-    const badgeW = textWidth + 16;
+    const badgePadX = 8;
+    const badgeW = textWidth + badgePadX * 2;
     const badgeH = 20;
+    const badgeX = screenCx - badgeW / 2;
     const badgeY = screenCy - screenR - badgeH - 6;
 
-    overlayCtx.fillStyle = 'rgba(9, 13, 22, 0.85)';
-    overlayCtx.strokeStyle = strokeColor;
-    overlayCtx.lineWidth = 1;
-    _drawRoundedRect(overlayCtx, screenCx - badgeW / 2, badgeY, badgeW, badgeH, 10);
-    overlayCtx.fill();
-    overlayCtx.stroke();
+    if (badgeY > 4) {
+      overlayCtx.fillStyle = 'rgba(9, 13, 22, 0.85)';
+      overlayCtx.strokeStyle = strokeColor;
+      overlayCtx.lineWidth = 1;
+      overlayCtx.beginPath();
+      overlayCtx.roundRect(badgeX, badgeY, badgeW, badgeH, 10);
+      overlayCtx.fill();
+      overlayCtx.stroke();
 
-    overlayCtx.fillStyle = strokeColor;
-    overlayCtx.textAlign = 'center';
-    overlayCtx.textBaseline = 'middle';
-    overlayCtx.fillText(labelText, screenCx, badgeY + badgeH / 2);
+      overlayCtx.fillStyle = '#ffffff';
+      overlayCtx.textAlign = 'center';
+      overlayCtx.textBaseline = 'middle';
+      overlayCtx.fillText(labelText, screenCx, badgeY + badgeH / 2);
+    }
   }
 
   overlayCtx.restore();
+
+  if (state.isAlignmentGridVisible) {
+    drawAlignmentGrid();
+  }
 }
 
-function _drawRoundedRect(ctx, x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.lineTo(x + w - r, y);
-  ctx.arcTo(x + w, y, x + w, y + r, r);
-  ctx.lineTo(x + w, y + h - r);
-  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
-  ctx.lineTo(x + r, y + h);
-  ctx.arcTo(x, y + h, x, y + h - r, r);
-  ctx.lineTo(x, y + r);
-  ctx.arcTo(x, y, x + r, y, r);
-  ctx.closePath();
+/**
+ * Feature 3: Draw Camera-to-Projector Alignment Grid & Target Overlay.
+ */
+function drawAlignmentGrid() {
+  if (!alignmentGridCtx || !dom.alignmentGridCanvas) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const w = dom.alignmentGridCanvas.width / dpr;
+  const h = dom.alignmentGridCanvas.height / dpr;
+  const rect = getVideoRenderRect();
+
+  alignmentGridCtx.save();
+  alignmentGridCtx.setTransform(1, 0, 0, 1, 0, 0);
+  alignmentGridCtx.clearRect(0, 0, dom.alignmentGridCanvas.width, dom.alignmentGridCanvas.height);
+  alignmentGridCtx.scale(dpr, dpr);
+
+  // Background semi-dark grid
+  alignmentGridCtx.strokeStyle = 'rgba(59, 130, 246, 0.22)';
+  alignmentGridCtx.lineWidth = 1;
+
+  // 10% grid lines
+  for (let x = 0; x <= w; x += w / 10) {
+    alignmentGridCtx.beginPath();
+    alignmentGridCtx.moveTo(x, 0);
+    alignmentGridCtx.lineTo(x, h);
+    alignmentGridCtx.stroke();
+  }
+  for (let y = 0; y <= h; y += h / 10) {
+    alignmentGridCtx.beginPath();
+    alignmentGridCtx.moveTo(0, y);
+    alignmentGridCtx.lineTo(w, y);
+    alignmentGridCtx.stroke();
+  }
+
+  // Center Crosshair
+  alignmentGridCtx.strokeStyle = '#38bdf8';
+  alignmentGridCtx.lineWidth = 1.8;
+  alignmentGridCtx.beginPath();
+  alignmentGridCtx.moveTo(w / 2, 0);
+  alignmentGridCtx.lineTo(w / 2, h);
+  alignmentGridCtx.moveTo(0, h / 2);
+  alignmentGridCtx.lineTo(w, h / 2);
+  alignmentGridCtx.stroke();
+
+  // Draw Projected Target Ring
+  const proj = getProjectorCoordinates(state.zone.cx, state.zone.cy, state.zone.r);
+  const pcx = rect.left + proj.cx * rect.width;
+  const pcy = rect.top + proj.cy * rect.height;
+  const pr = proj.r * rect.minDim;
+
+  alignmentGridCtx.strokeStyle = '#f59e0b';
+  alignmentGridCtx.lineWidth = 3;
+  alignmentGridCtx.setLineDash([8, 8]);
+  alignmentGridCtx.beginPath();
+  alignmentGridCtx.arc(pcx, pcy, pr, 0, Math.PI * 2);
+  alignmentGridCtx.stroke();
+  alignmentGridCtx.setLineDash([]);
+
+  // Orientation mark at 12 o'clock
+  alignmentGridCtx.fillStyle = '#ef4444';
+  alignmentGridCtx.beginPath();
+  alignmentGridCtx.arc(pcx, pcy - pr, 6, 0, Math.PI * 2);
+  alignmentGridCtx.fill();
+
+  // Alignment banner
+  alignmentGridCtx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+  alignmentGridCtx.strokeStyle = '#38bdf8';
+  alignmentGridCtx.lineWidth = 1;
+  alignmentGridCtx.beginPath();
+  alignmentGridCtx.roundRect(w / 2 - 140, 16, 280, 28, 6);
+  alignmentGridCtx.fill();
+  alignmentGridCtx.stroke();
+
+  alignmentGridCtx.fillStyle = '#ffffff';
+  alignmentGridCtx.font = '600 12px var(--font-sans)';
+  alignmentGridCtx.textAlign = 'center';
+  alignmentGridCtx.textBaseline = 'middle';
+  alignmentGridCtx.fillText('ALIGNMENT GRID ACTIVE (Tap to match floor)', w / 2, 30);
+
+  alignmentGridCtx.restore();
 }
 
 /* =========================================================================
-   2. Pointer & Touch Interactions
+   4. Touch & Pointer Drag / Pinch Controls
    ========================================================================= */
 
 function setupPointerInteractions() {
   const canvas = dom.overlayCanvas;
 
   canvas.addEventListener('pointerdown', (e) => {
-    // If in monitor view: tapping toggles the quick action bar (Stop, Recalibrate, Mute)
-    if (state.isMonitorView) {
-      toggleMonitorQuickBar();
-      return;
-    }
-
     canvas.setPointerCapture(e.pointerId);
     state.activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
-    const rect = getVideoRenderRect();
-    const canvasBounds = canvas.getBoundingClientRect();
-    const clickX = e.clientX - canvasBounds.left;
-    const clickY = e.clientY - canvasBounds.top;
-
-    const screenCx = rect.left + state.zone.cx * rect.width;
-    const screenCy = rect.top + state.zone.cy * rect.height;
-    const screenR = state.zone.r * rect.minDim;
-
-    const distToCenter = Math.hypot(clickX - screenCx, clickY - screenCy);
-    const isNearHandle = Math.hypot(clickX - (screenCx + screenR), clickY - screenCy) < 24;
-
     if (state.activePointers.size === 1) {
-      state.isDragging = distToCenter <= screenR * 1.2 || isNearHandle;
-      state.dragStartZone = { ...state.zone };
-      state.dragStartCoord = { x: clickX, y: clickY };
-      state.isResizing = isNearHandle;
+      const rect = getVideoRenderRect();
+      const pointerX = (e.clientX - rect.left) / rect.width;
+      const pointerY = (e.clientY - rect.top) / rect.height;
+
+      state.dragStartZone = {
+        pointerX,
+        pointerY,
+        zoneCx: state.zone.cx,
+        zoneCy: state.zone.cy
+      };
     } else if (state.activePointers.size === 2) {
       const pts = Array.from(state.activePointers.values());
       state.initialPinchDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
@@ -525,253 +769,190 @@ function setupPointerInteractions() {
   });
 
   canvas.addEventListener('pointermove', (e) => {
-    if (state.isMonitorView) return; // Disabled while in monitor view
     if (!state.activePointers.has(e.pointerId)) return;
     state.activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
-    const rect = getVideoRenderRect();
-    const canvasBounds = canvas.getBoundingClientRect();
+    // Dragging locked during active monitoring
+    if (state.isMonitoring) return;
 
-    if (state.activePointers.size === 2) {
+    if (state.activePointers.size === 1 && state.dragStartZone) {
+      const rect = getVideoRenderRect();
+      const currentX = (e.clientX - rect.left) / rect.width;
+      const currentY = (e.clientY - rect.top) / rect.height;
+
+      const deltaX = currentX - state.dragStartZone.pointerX;
+      const deltaY = currentY - state.dragStartZone.pointerY;
+
+      state.zone.cx = state.dragStartZone.zoneCx + deltaX;
+      state.zone.cy = state.dragStartZone.zoneCy + deltaY;
+
+      clampZoneCoordinates();
+      drawOverlay();
+      detector.resetBackground();
+    } else if (state.activePointers.size === 2 && state.initialPinchDist > 0) {
       const pts = Array.from(state.activePointers.values());
       const currentDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
-      if (state.initialPinchDist > 0) {
-        const scale = currentDist / state.initialPinchDist;
-        state.zone.r = state.initialPinchRadius * scale;
-        clampZoneCoordinates();
-        drawOverlay();
-        persistSettings();
-      }
-      return;
-    }
+      const ratio = currentDist / state.initialPinchDist;
 
-    if (state.isResizing) {
-      const clickX = e.clientX - canvasBounds.left;
-      const screenCx = rect.left + state.zone.cx * rect.width;
-      const newRadiusPx = Math.abs(clickX - screenCx);
-      state.zone.r = newRadiusPx / rect.minDim;
+      state.zone.r = state.initialPinchRadius * ratio;
       clampZoneCoordinates();
       drawOverlay();
-      persistSettings();
-      return;
-    }
-
-    if (state.isDragging && state.dragStartCoord) {
-      const currentX = e.clientX - canvasBounds.left;
-      const currentY = e.clientY - canvasBounds.top;
-
-      const deltaX = currentX - state.dragStartCoord.x;
-      const deltaY = currentY - state.dragStartCoord.y;
-
-      state.zone.cx = state.dragStartZone.cx + (deltaX / rect.width);
-      state.zone.cy = state.dragStartZone.cy + (deltaY / rect.height);
-
-      clampZoneCoordinates();
-      drawOverlay();
-      persistSettings();
+      detector.resetBackground();
     }
   });
 
   const onPointerUp = (e) => {
     state.activePointers.delete(e.pointerId);
-    try {
-      if (canvas.hasPointerCapture(e.pointerId)) {
-        canvas.releasePointerCapture(e.pointerId);
-      }
-    } catch {
-      // Ignore
-    }
-
     if (state.activePointers.size === 0) {
-      state.isDragging = false;
-      state.isResizing = false;
       state.dragStartZone = null;
-      state.dragStartCoord = null;
-    } else if (state.activePointers.size === 1) {
-      state.initialPinchDist = 0;
+      persistSettings();
     }
   };
 
   canvas.addEventListener('pointerup', onPointerUp);
   canvas.addEventListener('pointercancel', onPointerUp);
-
-  // Radius slider
-  dom.circleRadiusSlider.addEventListener('input', (e) => {
-    state.zone.r = Number(e.target.value) / 100;
-    clampZoneCoordinates();
-    drawOverlay();
-    persistSettings();
-  });
 }
 
-function toggleMonitorQuickBar() {
-  if (!state.isMonitorView) return;
-  dom.monitorQuickBar.classList.remove('hidden');
+/* =========================================================================
+   5. Fullscreen Monitor View & Projector Mode Transitions
+   ========================================================================= */
 
-  if (state.quickBarTimer) clearTimeout(state.quickBarTimer);
+function applyProjectorMode(isProj) {
+  state.isProjectorMode = isProj;
+  dom.appLayout.classList.toggle('projector-mode-active', isProj);
+  drawOverlay();
+}
+
+function enterMonitorView() {
+  if (state.isMonitorView) return;
+  state.isMonitorView = true;
+  dom.appLayout.classList.add('monitor-view-active');
+
+  // Request native fullscreen where supported
+  try {
+    const el = dom.videoContainer;
+    if (el.requestFullscreen) {
+      el.requestFullscreen().catch(() => {});
+    } else if (el.webkitRequestFullscreen) {
+      el.webkitRequestFullscreen();
+    }
+  } catch (err) {
+    // Fail silently
+  }
+
+  showMonitorQuickBar();
+  resizeOverlayCanvas();
+  drawOverlay();
+}
+
+function exitMonitorView() {
+  if (!state.isMonitorView) return;
+  state.isMonitorView = false;
+  dom.appLayout.classList.remove('monitor-view-active');
+
+  try {
+    if (document.fullscreenElement && document.exitFullscreen) {
+      document.exitFullscreen().catch(() => {});
+    } else if (document.webkitFullscreenElement && document.webkitExitFullscreen) {
+      document.webkitExitFullscreen();
+    }
+  } catch (err) {
+    // Fail silently
+  }
+
+  if (state.quickBarTimer) {
+    clearTimeout(state.quickBarTimer);
+    state.quickBarTimer = null;
+  }
+  dom.monitorQuickBar.classList.add('hidden');
+
+  resizeOverlayCanvas();
+  drawOverlay();
+}
+
+function showMonitorQuickBar() {
+  dom.monitorQuickBar.classList.remove('hidden');
+  if (state.quickBarTimer) {
+    clearTimeout(state.quickBarTimer);
+  }
+  // Auto-hide after 4 seconds
   state.quickBarTimer = setTimeout(() => {
-    dom.monitorQuickBar.classList.add('hidden');
+    if (state.isMonitorView) {
+      dom.monitorQuickBar.classList.add('hidden');
+    }
   }, 4000);
 }
 
-/* =========================================================================
-   3. Fullscreen & Monitor View Transition
-   ========================================================================= */
+// Tap container to toggle quick bar
+dom.videoContainer.addEventListener('click', (e) => {
+  if (!state.isMonitorView) return;
+  if (e.target.closest('#monitorQuickBar') || e.target.closest('#alertVideoOverlay')) return;
 
-/**
- * Enter Fullscreen Monitor View (after calibration succeeds).
- * Uses Fullscreen API where supported; falls back to CSS fullscreen (e.g. iPhone Safari).
- */
-async function enterMonitorView() {
-  state.isMonitorView = true;
-  dom.appLayout.classList.add('monitor-view-active');
-  dom.zoneHelperPill.classList.add('hidden');
-
-  // Attempt HTML5 Fullscreen API (fail gracefully on iOS Safari)
-  if (document.fullscreenEnabled || document.webkitFullscreenEnabled) {
-    try {
-      if (dom.videoContainer.requestFullscreen) {
-        await dom.videoContainer.requestFullscreen();
-      } else if (dom.videoContainer.webkitRequestFullscreen) {
-        await dom.videoContainer.webkitRequestFullscreen();
-      }
-    } catch {
-      // Rejections are expected on iOS Safari or when permission not given; CSS fullscreen covers it
-    }
+  if (dom.monitorQuickBar.classList.contains('hidden')) {
+    showMonitorQuickBar();
+  } else {
+    dom.monitorQuickBar.classList.add('hidden');
   }
-
-  await acquireWakeLock();
-  resizeOverlayCanvas();
-  drawOverlay();
-}
-
-/**
- * Exit Fullscreen Monitor View and restore standard controls UI.
- */
-async function exitMonitorView() {
-  state.isMonitorView = false;
-  dom.appLayout.classList.remove('monitor-view-active');
-  dom.monitorQuickBar.classList.add('hidden');
-
-  if (state.quickBarTimer) clearTimeout(state.quickBarTimer);
-
-  if (document.fullscreenElement || document.webkitFullscreenElement) {
-    try {
-      if (document.exitFullscreen) {
-        await document.exitFullscreen();
-      } else if (document.webkitExitFullscreen) {
-        await document.webkitExitFullscreen();
-      }
-    } catch {
-      // Ignore
-    }
-  }
-
-  resizeOverlayCanvas();
-  drawOverlay();
-}
-
-// Fullscreen change listener (handle Esc key or system gesture)
-function handleFullscreenChange() {
-  const isDocFullscreen = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
-  if (!isDocFullscreen && state.isMonitorView) {
-    // If user pressed Esc, restore standard controls while keeping monitoring active
-    exitMonitorView();
-    showToast('Exited fullscreen view. Monitoring continues in standard view.', 'info');
-  }
-}
-
-document.addEventListener('fullscreenchange', handleFullscreenChange);
-document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+});
 
 /* =========================================================================
-   4. Camera Lifecycle & Fallback Chain
+   6. Camera Lifecycle & Device Handling
    ========================================================================= */
 
 async function startCamera() {
-  if (state.isDemoMode) {
-    stopDemoMode();
-  }
+  stopCamera();
+  if (state.isDemoMode) stopDemoMode();
 
-  showToast('Initializing camera...', 'info');
+  updateStatusBadge('STARTING_CAMERA');
+  showToast('Requesting camera access...', 'info');
 
-  const constraintsList = [
-    {
-      video: {
-        facingMode: { ideal: 'environment' },
-        width: { ideal: 1280 },
-        height: { ideal: 720 }
-      },
-      audio: false
-    },
-    {
-      video: {
-        facingMode: 'environment'
-      },
-      audio: false
-    },
-    {
-      video: true,
-      audio: false
+  const idealConstraints = {
+    audio: false,
+    video: {
+      facingMode: { ideal: 'environment' },
+      width: { ideal: 1280 },
+      height: { ideal: 720 }
     }
-  ];
-
-  let stream = null;
-  let lastError = null;
-
-  for (const constraints of constraintsList) {
-    try {
-      stream = await navigator.mediaDevices.getUserMedia(constraints);
-      if (stream) break;
-    } catch (err) {
-      lastError = err;
-      console.warn('getUserMedia constraint failed, attempting fallback:', constraints, err);
-    }
-  }
-
-  if (!stream) {
-    handleCameraError(lastError);
-    return false;
-  }
-
-  state.stream = stream;
-  dom.cameraFeed.srcObject = stream;
+  };
 
   try {
-    await dom.cameraFeed.play();
-  } catch (playErr) {
-    console.error('Error starting video playback:', playErr);
-  }
-
-  state.isCameraActive = true;
-  dom.emptyCameraState.classList.add('hidden');
-  dom.zoneHelperPill.classList.remove('hidden');
-
-  const track = stream.getVideoTracks()[0];
-  if (track && track.applyConstraints) {
     try {
-      await track.applyConstraints({
-        advanced: [
-          { exposureMode: 'continuous' },
-          { focusMode: 'continuous' }
-        ]
-      });
+      state.stream = await navigator.mediaDevices.getUserMedia(idealConstraints);
     } catch {
-      // Fail silently
+      // Fallback to any available camera
+      state.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
     }
+
+    dom.cameraFeed.srcObject = state.stream;
+    await dom.cameraFeed.play();
+
+    state.isCameraActive = true;
+    dom.emptyCameraState.classList.add('hidden');
+
+    // Start Fire Ring animation loop
+    if (fireRing) {
+      fireRing.start();
+    }
+
+    const track = state.stream.getVideoTracks()[0];
+    if (track) {
+      track.addEventListener('ended', onStreamEnded);
+      track.addEventListener('mute', onStreamMuted);
+      track.addEventListener('unmute', onStreamUnmuted);
+    }
+
+    updateUI();
+    resizeOverlayCanvas();
+    clampZoneCoordinates();
+    drawOverlay();
+
+    showToast('Camera active. Position circle and tap Start Monitoring', 'success');
+  } catch (err) {
+    console.error('Camera access error:', err);
+    state.isCameraActive = false;
+    updateUI();
+    showToast(`Camera error: ${err.message || 'Permission denied'}`, 'error');
   }
-
-  track.addEventListener('ended', onStreamEnded);
-  track.addEventListener('mute', onStreamMuted);
-  track.addEventListener('unmute', onStreamUnmuted);
-
-  updateUI();
-  await enumerateCameras();
-  resizeOverlayCanvas();
-  drawOverlay();
-
-  showToast('Camera active. Drag the circle over the target ground area.', 'success');
-  return true;
 }
 
 function stopCamera() {
@@ -780,153 +961,32 @@ function stopCamera() {
   }
 
   if (state.stream) {
-    state.stream.getTracks().forEach((track) => {
-      track.removeEventListener('ended', onStreamEnded);
-      track.removeEventListener('mute', onStreamMuted);
-      track.removeEventListener('unmute', onStreamUnmuted);
-      track.stop();
-    });
+    state.stream.getTracks().forEach((t) => t.stop());
     state.stream = null;
   }
 
   dom.cameraFeed.srcObject = null;
   state.isCameraActive = false;
-  state.isPaused = false;
 
   dom.emptyCameraState.classList.remove('hidden');
-  dom.zoneHelperPill.classList.add('hidden');
-  dom.alertBanner.classList.add('hidden');
 
-  exitMonitorView();
+  if (fireRing) {
+    fireRing.stop();
+  }
+
   updateUI();
   drawOverlay();
 }
 
-function handleCameraError(err) {
-  let message = 'Unable to access the camera.';
-
-  if (!err) {
-    message = 'Camera device not supported or blocked.';
-  } else if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-    message = 'Camera permission was denied. Please allow camera permissions in your browser address bar and reload.';
-  } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-    message = 'No camera hardware found on this device.';
-  } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
-    message = 'Camera is currently locked or in use by another tab or app.';
-  } else if (err.name === 'OverconstrainedError') {
-    message = 'Requested camera resolution/mode is unsupported by this device.';
-  } else {
-    message = `Camera error: ${err.message || err.name}`;
-  }
-
-  showToast(message, 'error', 6000);
-}
-
-async function enumerateCameras() {
-  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
-
-  try {
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    state.availableVideoDevices = devices.filter((d) => d.kind === 'videoinput');
-
-    if (state.availableVideoDevices.length > 1) {
-      dom.btnSwitchCamera.classList.remove('hidden');
-    } else {
-      dom.btnSwitchCamera.classList.add('hidden');
-    }
-  } catch (err) {
-    console.warn('enumerateDevices error:', err);
-  }
-}
-
-async function switchCamera() {
-  if (state.availableVideoDevices.length <= 1) return;
-
-  const currentTrack = state.stream?.getVideoTracks()[0];
-  const currentId = currentTrack?.getSettings()?.deviceId;
-
-  let nextIndex = 0;
-  if (currentId) {
-    const currentIndex = state.availableVideoDevices.findIndex((d) => d.deviceId === currentId);
-    nextIndex = (currentIndex + 1) % state.availableVideoDevices.length;
-  }
-  const nextDevice = state.availableVideoDevices[nextIndex];
-
-  stopCamera();
-
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { deviceId: { exact: nextDevice.deviceId } },
-      audio: false
-    });
-
-    state.stream = stream;
-    dom.cameraFeed.srcObject = stream;
-    await dom.cameraFeed.play();
-    state.isCameraActive = true;
-    dom.emptyCameraState.classList.add('hidden');
-
-    updateUI();
-    showToast(`Switched to: ${nextDevice.label || 'Camera ' + (nextIndex + 1)}`, 'info');
-  } catch (err) {
-    handleCameraError(err);
-  }
-}
-
-/* =========================================================================
-   5. Screen Wake Lock & Tab Interruption Handling
-   ========================================================================= */
-
-async function acquireWakeLock() {
-  if ('wakeLock' in navigator && !state.wakeLock) {
-    try {
-      state.wakeLock = await navigator.wakeLock.request('screen');
-      state.wakeLock.addEventListener('release', () => {
-        state.wakeLock = null;
-      });
-    } catch {
-      // Ignored
-    }
-  }
-}
-
-function releaseWakeLock() {
-  if (state.wakeLock) {
-    try {
-      state.wakeLock.release();
-    } catch {
-      // Ignore
-    }
-    state.wakeLock = null;
-  }
-}
-
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) {
-    if (state.isVideoPlaying && videoPlayer) {
-      videoPlayer.stop();
-      state.isVideoPlaying = false;
-    }
-    if (state.isMonitoring) {
-      pauseMonitoring('Interrupted: Tab minimized or screen locked');
-    }
-  } else {
-    if (state.isMonitoring && state.isPaused) {
-      resumeMonitoring();
-    }
-  }
-});
-
 function onStreamEnded() {
-  if (state.isVideoPlaying && videoPlayer) {
-    videoPlayer.stop();
-    state.isVideoPlaying = false;
-  }
-  pauseMonitoring('Camera feed was terminated');
+  showToast('Camera disconnected', 'error');
+  stopCamera();
 }
 
 function onStreamMuted() {
-  pauseMonitoring('Camera track muted by operating system');
+  if (state.isMonitoring && !state.isPaused) {
+    pauseMonitoring('Camera feed interrupted');
+  }
 }
 
 function onStreamUnmuted() {
@@ -950,13 +1010,9 @@ function resumeMonitoring() {
 }
 
 /* =========================================================================
-   6. Vision Loop & Video Alert Coordination
+   7. Vision Loop & Video Alert Coordination
    ========================================================================= */
 
-/**
- * Start Monitoring loop.
- * Unlocks AudioContext AND Video Player Autoplay in this user tap!
- */
 async function startMonitoring() {
   if (!state.isCameraActive && !state.isDemoMode) {
     showToast('Start camera or demo mode first!', 'warning');
@@ -987,17 +1043,23 @@ async function startMonitoring() {
   }
 
   await acquireWakeLock();
+
+  // Feature 2.2: Steady-state calibration
+  // Calibration starts WITH the fire ring running at normal intensity, so the
+  // floor's average illumination from the flames is part of the baseline.
+  if (fireRing) {
+    fireRing.start();
+    fireRing.setState('CALIBRATING');
+  }
+
   detector.startCalibration(12, EngineState.CALIBRATING);
   updateUI();
 
-  showToast('Calibrating background (~2s). Keep device steady...', 'info');
+  showToast('Calibrating background (~2s) with fire baseline...', 'info');
 
   scheduleNextFrame();
 }
 
-/**
- * Stop Monitoring loop. Restores normal view and releases all states.
- */
 function stopMonitoring() {
   state.isMonitoring = false;
   state.isPaused = false;
@@ -1028,7 +1090,7 @@ function stopMonitoring() {
 
 function scheduleNextFrame() {
   if (!state.isMonitoring && !state.isDemoMode) return;
-  if (state.isVideoPlaying) return; // Analysis paused while video plays
+  if (state.isVideoPlaying) return;
 
   if (state.isCameraActive && 'requestVideoFrameCallback' in dom.cameraFeed) {
     state.rvfcHandle = dom.cameraFeed.requestVideoFrameCallback((now) => {
@@ -1041,9 +1103,6 @@ function scheduleNextFrame() {
   }
 }
 
-/**
- * Vision evaluation cycle.
- */
 function onVideoFrame(now) {
   if (state.isVideoPlaying) return;
 
@@ -1054,7 +1113,6 @@ function onVideoFrame(now) {
   }
   state.lastProcessTimestamp = now;
 
-  // FPS calculation for debug
   state.frameCount++;
   if (now - state.lastFpsTimestamp >= 1000) {
     state.currentFps = Math.round((state.frameCount * 1000) / (now - state.lastFpsTimestamp));
@@ -1070,14 +1128,12 @@ function onVideoFrame(now) {
     return;
   }
 
-  // Extract ROI and Guard regions
   const sourceElement = state.isDemoMode ? dom.demoCanvas : dom.cameraFeed;
   const metrics = processFrame(sourceElement, now);
 
-  // Redraw overlay with status & mask
   drawOverlay(metrics.state, metrics.changedPercent);
 
-  // Auto-switch to Monitor View when calibration finishes!
+  // Auto-switch to Monitor View when calibration finishes
   if (metrics.state === EngineState.MONITORING && !state.isMonitorView && state.isMonitoring) {
     enterMonitorView();
   }
@@ -1096,7 +1152,6 @@ function onVideoFrame(now) {
   }
 
   updateStatusBadge(metrics.state);
-
   scheduleNextFrame();
 }
 
@@ -1130,12 +1185,27 @@ function processFrame(sourceElement, timestamp) {
   );
   const roiImageData = procCtx.getImageData(0, 0, dom.processingCanvas.width, dom.processingCanvas.height);
 
-  // 2. Draw guard thumbnail for bump detection
+  // 2. Feature 2.1: Draw guard thumbnail strictly EXCLUDING the lit fire zone
+  guardCtx.clearRect(0, 0, dom.guardCanvas.width, dom.guardCanvas.height);
   guardCtx.drawImage(
     sourceElement,
     0, 0, srcW, srcH,
     0, 0, dom.guardCanvas.width, dom.guardCanvas.height
   );
+
+  const guardScaleX = dom.guardCanvas.width / srcW;
+  const guardScaleY = dom.guardCanvas.height / srcH;
+  const gcx = cxPixels * guardScaleX;
+  const gcy = cyPixels * guardScaleY;
+  const gr = rPixels * Math.max(guardScaleX, guardScaleY) * 1.35; // Exclude circle + outer flame reach
+
+  guardCtx.save();
+  guardCtx.globalCompositeOperation = 'destination-out';
+  guardCtx.beginPath();
+  guardCtx.arc(gcx, gcy, Math.max(2, gr), 0, Math.PI * 2);
+  guardCtx.fill();
+  guardCtx.restore();
+
   const guardImageData = guardCtx.getImageData(0, 0, dom.guardCanvas.width, dom.guardCanvas.height);
 
   // 3. Process via MotionDetector
@@ -1149,48 +1219,73 @@ function processFrame(sourceElement, timestamp) {
 }
 
 /**
- * Handle motion event: triggers fullscreen video player (if enabled) or sound alert.
+ * Handle motion event: triggers fire flare, then video player or sound alert.
  */
 function onMotionAlert(metrics) {
-  // Update timestamp
   const now = new Date();
   const timeStr = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
   dom.alertTimestamp.textContent = `${timeStr} (${metrics.changedPercent.toFixed(1)}% area)`;
 
-  // Check if Feature 2 (Video Alert) is enabled
+  // Feature 1.3: Fire Ring Flare on motion!
+  if (fireRing) {
+    fireRing.flare(500);
+  }
+  projectorChannel.postMessage({ type: 'flare', duration: 500 });
+
+  // Feature 2: Motion Video Alert
   if (state.isVideoOnMotion && videoPlayer) {
     state.isVideoPlaying = true;
     updateStatusBadge('VIDEO_PLAYING');
 
+    projectorChannel.postMessage({
+      type: 'video_play',
+      src: videoPlayer.currentObjectUrl || videoPlayer.defaultVideoSrc
+    });
+
     videoPlayer.playAlertVideo({
-      onEnded: () => onVideoAlertComplete(),
-      onSkipped: () => onVideoAlertComplete(),
+      onEnded: () => {
+        onVideoPlaybackDone();
+      },
+      onSkipped: () => {
+        onVideoPlaybackDone();
+      },
       onError: (err) => {
-        console.warn('Video failed, falling back to sound alert:', err);
-        state.isVideoPlaying = false;
+        console.warn('Video alert playback failed:', err);
         audioAlert.triggerAlert();
-        scheduleNextFrame();
+        onVideoPlaybackDone();
       }
     });
-    return;
-  }
+  } else {
+    // Sound fallback alert
+    audioAlert.triggerAlert();
 
-  // Fallback to standalone sound alert
-  audioAlert.triggerAlert();
-  updateStatusBadge(EngineState.ALERTING);
+    // Feature 2.4: Flare suppression when video is disabled
+    // Suppress detection during the 500ms flare, then run short recalibration
+    setTimeout(() => {
+      if (state.isMonitoring) {
+        detector.startCalibration(6, EngineState.RESUMING);
+      }
+    }, 500);
+  }
 }
 
-/**
- * Follows the video completion return-and-recalibrate path.
- */
-function onVideoAlertComplete() {
+function onVideoPlaybackDone() {
   state.isVideoPlaying = false;
+  projectorChannel.postMessage({ type: 'video_stop' });
 
-  // Short recalibration (~8 frames, ~1.2s) to adjust to scene light change from phone screen
-  updateStatusBadge(EngineState.RESUMING);
+  if (state.isMonitoring) {
+    startPostVideoRecalibration();
+  } else {
+    updateUI();
+    drawOverlay();
+  }
+}
+
+function startPostVideoRecalibration() {
+  updateStatusBadge('RESUMING');
   detector.startCalibration(8, EngineState.RESUMING);
-
-  // Resume motion analysis loop
+  updateUI();
+  drawOverlay();
   scheduleNextFrame();
 }
 
@@ -1203,6 +1298,14 @@ function updateDebugHud(metrics) {
     dom.debugStateVal.textContent = 'VIDEO PLAYING';
   } else {
     dom.debugStateVal.textContent = metrics.state;
+  }
+
+  if (dom.debugFireFpsVal && fireRing) {
+    dom.debugFireFpsVal.textContent = `${fireRing.fps} FPS (${fireRing.activeParticleCount} pts)`;
+  }
+  if (dom.debugActiveRadiusVal) {
+    const act = Math.round((1 - state.guardBandPercent / 100) * 100);
+    dom.debugActiveRadiusVal.textContent = `${act}% (${state.guardBandPercent}% guard)`;
   }
 
   if (metrics.diffMask) {
@@ -1232,7 +1335,66 @@ function updateDebugHud(metrics) {
 }
 
 /* =========================================================================
-   7. Demo Mode Simulation
+   8. Feature 2.5: Projector Stability 10-Second Benchmark
+   ========================================================================= */
+
+async function runProjectorTest() {
+  if (state.isProjectorTesting) return;
+  if (!state.isMonitoring && !state.isDemoMode) {
+    showToast('Start camera and monitoring first before testing stability!', 'warning');
+    return;
+  }
+
+  state.isProjectorTesting = true;
+  dom.btnProjectorTest.disabled = true;
+  dom.projectorTestResult.textContent = 'Testing stability for 10s (Keep circle empty)...';
+  showToast('Starting 10-second Projector Stability Benchmark...', 'info');
+
+  const startTime = performance.now();
+  const testDuration = 10000;
+  let maxChanged = 0;
+  let sumChanged = 0;
+  let frameCount = 0;
+  let falseAlerts = 0;
+
+  const testInterval = setInterval(() => {
+    const elapsed = performance.now() - startTime;
+    const remaining = Math.max(0, Math.ceil((testDuration - elapsed) / 1000));
+
+    const changed = detector.lastChangedPercent;
+    maxChanged = Math.max(maxChanged, changed);
+    sumChanged += changed;
+    frameCount++;
+
+    if (detector.state === EngineState.ALERTING) {
+      falseAlerts++;
+    }
+
+    dom.projectorTestResult.textContent = `Testing: ${remaining}s left | Max: ${maxChanged.toFixed(1)}%`;
+
+    if (elapsed >= testDuration) {
+      clearInterval(testInterval);
+      state.isProjectorTesting = false;
+      dom.btnProjectorTest.disabled = false;
+
+      const avgChanged = frameCount > 0 ? (sumChanged / frameCount).toFixed(2) : '0';
+      const enterThreshold = detector.minAreaPercent;
+
+      if (falseAlerts > 0 || maxChanged >= enterThreshold) {
+        const msg = `⚠️ Warning: Max change was ${maxChanged.toFixed(1)}% (Threshold: ${enterThreshold}%). ${falseAlerts} false alerts detected. Suggest raising Guard Band slider by 3-5%.`;
+        dom.projectorTestResult.textContent = msg;
+        showToast(msg, 'warning');
+      } else {
+        const msg = `✅ Pass: 0 false alerts. Max changed ${maxChanged.toFixed(1)}% (Avg: ${avgChanged}%). Stability baseline is clean!`;
+        dom.projectorTestResult.textContent = msg;
+        showToast(msg, 'success');
+      }
+    }
+  }, 200);
+}
+
+/* =========================================================================
+   9. Demo Mode Simulation
    ========================================================================= */
 
 function toggleDemoMode() {
@@ -1244,244 +1406,242 @@ function toggleDemoMode() {
 }
 
 function startDemoMode() {
-  if (state.isCameraActive) {
-    stopCamera();
-  }
-
+  stopCamera();
   state.isDemoMode = true;
+
+  dom.demoCanvas.width = 640;
+  dom.demoCanvas.height = 480;
   dom.demoCanvas.classList.remove('hidden');
   dom.emptyCameraState.classList.add('hidden');
-  dom.zoneHelperPill.classList.remove('hidden');
 
-  dom.btnDemoMode.classList.add('btn-active-stop');
-  dom.labelDemoMode.textContent = 'Exit Demo';
+  generateDemoNoisePattern();
 
-  dom.demoCanvas.width = 1280;
-  dom.demoCanvas.height = 720;
-
-  _initDemoGroundTexture();
-  _runDemoAnimationLoop();
+  if (fireRing) {
+    fireRing.start();
+  }
 
   updateUI();
   resizeOverlayCanvas();
   drawOverlay();
 
-  showToast('Demo Mode active: synthetic ground scene with traversing target.', 'info');
+  runDemoAnimationLoop();
+  showToast('Demo Mode active with synthetic ground & target', 'info');
 }
 
 function stopDemoMode() {
-  state.isDemoMode = false;
-  dom.demoCanvas.classList.add('hidden');
-  dom.btnDemoMode.classList.remove('btn-active-stop');
-  dom.labelDemoMode.textContent = 'Demo Mode';
-
-  if (!state.isCameraActive) {
-    dom.emptyCameraState.classList.remove('hidden');
-    dom.zoneHelperPill.classList.add('hidden');
-  }
-
   if (state.isMonitoring) {
     stopMonitoring();
+  }
+  state.isDemoMode = false;
+  dom.demoCanvas.classList.add('hidden');
+  dom.emptyCameraState.classList.remove('hidden');
+
+  if (fireRing) {
+    fireRing.stop();
   }
 
   updateUI();
   drawOverlay();
 }
 
-function _initDemoGroundTexture() {
-  const off = document.createElement('canvas');
-  off.width = 256;
-  off.height = 256;
-  const ctx = off.getContext('2d');
-  const imgData = ctx.createImageData(256, 256);
-  const d = imgData.data;
+function generateDemoNoisePattern() {
+  const w = dom.demoCanvas.width;
+  const h = dom.demoCanvas.height;
+  const offscreen = document.createElement('canvas');
+  offscreen.width = w;
+  offscreen.height = h;
+  const octx = offscreen.getContext('2d');
 
-  for (let i = 0; i < d.length; i += 4) {
-    const v = 85 + (Math.random() * 30 | 0);
-    d[i] = v;
-    d[i + 1] = v;
-    d[i + 2] = v + 4;
-    d[i + 3] = 255;
+  octx.fillStyle = '#2d2d2d';
+  octx.fillRect(0, 0, w, h);
+
+  const imgData = octx.getImageData(0, 0, w, h);
+  const data = imgData.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const grain = (Math.random() - 0.5) * 24;
+    data[i] = Math.min(255, Math.max(0, data[i] + grain));
+    data[i + 1] = Math.min(255, Math.max(0, data[i + 1] + grain));
+    data[i + 2] = Math.min(255, Math.max(0, data[i + 2] + grain));
   }
-  ctx.putImageData(imgData, 0, 0);
-  demoAnim.groundNoisePattern = demoCtx.createPattern(off, 'repeat');
+  octx.putImageData(imgData, 0, 0);
+  demoNoisePattern = offscreen;
 }
 
-function _runDemoAnimationLoop() {
+function runDemoAnimationLoop() {
   if (!state.isDemoMode) return;
 
   const w = dom.demoCanvas.width;
   const h = dom.demoCanvas.height;
 
-  if (demoAnim.groundNoisePattern) {
-    demoCtx.fillStyle = demoAnim.groundNoisePattern;
-    demoCtx.fillRect(0, 0, w, h);
-  } else {
-    demoCtx.fillStyle = '#555';
-    demoCtx.fillRect(0, 0, w, h);
-  }
+  demoCtx.drawImage(demoNoisePattern, 0, 0);
 
-  demoAnim.x += demoAnim.vx;
-  demoAnim.y += demoAnim.vy;
+  // Moving synthetic target
+  demoAngle += 0.025;
+  demoTargetX = 0.5 + Math.cos(demoAngle) * 0.22;
+  demoTargetY = 0.5 + Math.sin(demoAngle * 1.5) * 0.18;
 
-  if (demoAnim.x < 0.05 || demoAnim.x > 0.85) demoAnim.vx = -demoAnim.vx;
-  if (demoAnim.y < 0.10 || demoAnim.y > 0.80) demoAnim.vy = -demoAnim.vy;
+  const tx = demoTargetX * w;
+  const ty = demoTargetY * h;
+  const tr = 24;
 
-  const objSizePx = demoAnim.size * Math.min(w, h);
-  const objXPx = demoAnim.x * w;
-  const objYPx = demoAnim.y * h;
+  const grad = demoCtx.createRadialGradient(tx, ty, 0, tx, ty, tr);
+  grad.addColorStop(0, '#e5e7eb');
+  grad.addColorStop(0.7, '#9ca3af');
+  grad.addColorStop(1, '#4b5563');
 
-  demoCtx.fillStyle = '#1e293b';
-  demoCtx.fillRect(objXPx, objYPx, objSizePx, objSizePx);
+  demoCtx.beginPath();
+  demoCtx.arc(tx, ty, tr, 0, Math.PI * 2);
+  demoCtx.fillStyle = grad;
+  demoCtx.fill();
 
-  demoCtx.strokeStyle = '#f8fafc';
-  demoCtx.lineWidth = 3;
-  demoCtx.strokeRect(objXPx, objYPx, objSizePx, objSizePx);
-
-  requestAnimationFrame(_runDemoAnimationLoop);
+  requestAnimationFrame(runDemoAnimationLoop);
 }
 
 /* =========================================================================
-   8. UI State & Extended Status Synchronization
+   10. Wake Lock Management
+   ========================================================================= */
+
+async function acquireWakeLock() {
+  if ('wakeLock' in navigator && !state.wakeLock) {
+    try {
+      state.wakeLock = await navigator.wakeLock.request('screen');
+      state.wakeLock.addEventListener('release', () => {
+        state.wakeLock = null;
+      });
+    } catch {
+      // Wake lock not granted or unsupported
+    }
+  }
+}
+
+function releaseWakeLock() {
+  if (state.wakeLock) {
+    state.wakeLock.release().catch(() => {});
+    state.wakeLock = null;
+  }
+}
+
+/* =========================================================================
+   11. UI State Synchronization & Settings Persistence
    ========================================================================= */
 
 function updateUI() {
-  const isRunning = state.isCameraActive || state.isDemoMode;
+  const isReady = state.isCameraActive || state.isDemoMode;
 
-  if (state.isCameraActive) {
-    dom.btnToggleCamera.classList.add('btn-active-stop');
-    dom.labelToggleCamera.textContent = 'Stop Camera';
-  } else {
-    dom.btnToggleCamera.classList.remove('btn-active-stop');
-    dom.labelToggleCamera.textContent = 'Start Camera';
-  }
-
-  dom.btnToggleMonitoring.disabled = !isRunning;
+  dom.btnMonitor.disabled = !isReady;
   dom.btnRecalibrate.disabled = !state.isMonitoring;
 
-  if (state.isMonitoring) {
-    dom.btnToggleMonitoring.classList.add('btn-active-stop');
-    dom.labelToggleMonitoring.textContent = 'Stop Monitoring';
+  if (state.isCameraActive) {
+    dom.btnStartCamera.classList.remove('btn-primary');
+    dom.btnStartCamera.classList.add('btn-secondary');
+    dom.btnStartCamera.querySelector('.btn-text').textContent = 'Stop Camera';
   } else {
-    dom.btnToggleMonitoring.classList.remove('btn-active-stop');
-    dom.labelToggleMonitoring.textContent = 'Start Monitoring';
+    dom.btnStartCamera.classList.add('btn-primary');
+    dom.btnStartCamera.classList.remove('btn-secondary');
+    dom.btnStartCamera.querySelector('.btn-text').textContent = 'Start Camera';
   }
 
-  updateStatusBadge(state.isMonitoring ? detector.state : EngineState.IDLE);
+  if (state.isMonitoring) {
+    dom.btnMonitor.classList.remove('btn-success');
+    dom.btnMonitor.classList.add('btn-danger');
+    dom.btnMonitor.querySelector('.btn-text').textContent = 'Stop Monitoring';
+    dom.btnMonitor.querySelector('.btn-icon').textContent = '⏹';
+  } else {
+    dom.btnMonitor.classList.add('btn-success');
+    dom.btnMonitor.classList.remove('btn-danger');
+    dom.btnMonitor.querySelector('.btn-text').textContent = 'Start Monitoring';
+    dom.btnMonitor.querySelector('.btn-icon').textContent = '▶';
+  }
+
+  dom.btnDemo.classList.toggle('active', state.isDemoMode);
 }
 
-/**
- * Extended Status Synchronization supporting:
- * Camera Off -> Calibrating -> Monitoring -> Motion Detected (Video Playing) -> Resuming -> Monitoring
- */
-function updateStatusBadge(engineState) {
-  dom.statusBadge.className = 'status-badge';
+function updateStatusBadge(statusKey) {
+  const badge = dom.statusBadge;
+  const text = dom.statusText;
 
-  if (!state.isCameraActive && !state.isDemoMode) {
-    dom.statusBadge.classList.add('status-off');
-    dom.statusIcon.textContent = '📷';
-    dom.statusText.textContent = 'Camera Off';
-    return;
-  }
+  badge.className = 'status-badge';
 
-  if (state.isPaused) {
-    dom.statusBadge.classList.add('status-paused');
-    dom.statusIcon.textContent = '⏸️';
-    dom.statusText.textContent = 'Monitoring Paused';
-    return;
-  }
-
-  if (!state.isMonitoring) {
-    dom.statusBadge.classList.add('status-off');
-    dom.statusIcon.textContent = '⏸️';
-    dom.statusText.textContent = 'Standby (Camera Live)';
-    return;
-  }
-
-  if (state.isVideoPlaying || engineState === 'VIDEO_PLAYING') {
-    dom.statusBadge.classList.add('status-video');
-    dom.statusIcon.textContent = '🎬';
-    dom.statusText.textContent = 'Motion Detected (Video Playing)';
-    return;
-  }
-
-  switch (engineState) {
+  switch (statusKey) {
+    case 'STARTING_CAMERA':
+      badge.classList.add('state-calibrating');
+      text.textContent = 'Starting Camera...';
+      break;
     case EngineState.CALIBRATING:
-      dom.statusBadge.classList.add('status-calibrating');
-      dom.statusIcon.textContent = '⏳';
-      dom.statusText.textContent = 'Calibrating...';
+      badge.classList.add('state-calibrating');
+      text.textContent = 'Calibrating (~2s)...';
       break;
     case EngineState.RESUMING:
-      dom.statusBadge.classList.add('status-resuming');
-      dom.statusIcon.textContent = '⏳';
-      dom.statusText.textContent = 'Resuming...';
-      break;
-    case EngineState.ALERTING:
-      dom.statusBadge.classList.add('status-alert');
-      dom.statusIcon.textContent = '🚨';
-      dom.statusText.textContent = 'Motion Detected';
-      break;
-    case EngineState.SUPPRESSED:
-      dom.statusBadge.classList.add('status-calibrating');
-      dom.statusIcon.textContent = '⚠️';
-      dom.statusText.textContent = 'Stabilizing Bump';
-      break;
-    case EngineState.COOLDOWN:
-      dom.statusBadge.classList.add('status-monitoring');
-      dom.statusIcon.textContent = '🟢';
-      dom.statusText.textContent = 'Monitoring (Cooldown)';
+      badge.classList.add('state-calibrating');
+      text.textContent = 'Resuming...';
       break;
     case EngineState.MONITORING:
+      badge.classList.add('state-monitoring');
+      text.textContent = 'Monitoring Circle';
+      break;
     case EngineState.CANDIDATE:
+      badge.classList.add('state-candidate');
+      text.textContent = 'Motion Candidate...';
+      break;
+    case EngineState.ALERTING:
+      badge.classList.add('state-alert');
+      text.textContent = 'MOTION DETECTED!';
+      break;
+    case 'VIDEO_PLAYING':
+      badge.classList.add('state-alert');
+      text.textContent = 'Playing Alert Video';
+      break;
+    case EngineState.COOLDOWN:
+      badge.classList.add('state-monitoring');
+      text.textContent = 'Alert Cooldown';
+      break;
+    case EngineState.SUPPRESSED:
+      badge.classList.add('state-calibrating');
+      text.textContent = 'Stabilizing Bump';
+      break;
     default:
-      dom.statusBadge.classList.add('status-monitoring');
-      dom.statusIcon.textContent = '🟢';
-      dom.statusText.textContent = 'Monitoring';
+      if (state.isCameraActive || state.isDemoMode) {
+        badge.classList.add('state-monitoring');
+        text.textContent = 'Camera Ready';
+      } else {
+        badge.classList.add('state-idle');
+        text.textContent = 'Camera Off';
+      }
       break;
   }
 }
 
-function showToast(message, type = 'info', duration = 3500) {
+function showToast(message, type = 'info') {
   const toast = document.createElement('div');
   toast.className = `toast toast-${type}`;
   toast.textContent = message;
-  dom.toastContainer.appendChild(toast);
 
+  dom.toastContainer.appendChild(toast);
   setTimeout(() => {
-    toast.style.opacity = '0';
-    toast.style.transform = 'translateY(10px)';
-    toast.style.transition = 'all 0.25s ease';
-    setTimeout(() => toast.remove(), 250);
-  }, duration);
+    toast.classList.add('fade-out');
+    setTimeout(() => toast.remove(), 400);
+  }, 3200);
 }
 
-/* =========================================================================
-   9. Settings & Persistence
-   ========================================================================= */
+function applyPreset(presetKey) {
+  if (detector.setPreset(presetKey)) {
+    state.activePreset = presetKey;
+    Object.keys(dom.presetButtons).forEach((key) => {
+      dom.presetButtons[key].classList.toggle('active', key === presetKey);
+    });
+    dom.customPresetBadge.classList.add('hidden');
 
-function applyPreset(presetName) {
-  if (!SENSITIVITY_PRESETS[presetName]) return;
+    const p = SENSITIVITY_PRESETS[presetKey];
+    dom.pixelThresholdSlider.value = p.pixelDiffThreshold;
+    dom.pixelThresholdVal.textContent = p.pixelDiffThreshold;
+    dom.areaThresholdSlider.value = p.minAreaPercent;
+    dom.areaThresholdVal.textContent = `${p.minAreaPercent.toFixed(1)}%`;
+    dom.confirmFramesSlider.value = p.consecutiveFrames;
+    dom.confirmFramesVal.textContent = p.consecutiveFrames;
 
-  state.activePreset = presetName;
-  detector.setPreset(presetName);
-
-  const preset = SENSITIVITY_PRESETS[presetName];
-  dom.pixelThresholdSlider.value = preset.pixelDiffThreshold;
-  dom.pixelThresholdVal.textContent = preset.pixelDiffThreshold;
-
-  dom.areaThresholdSlider.value = preset.minAreaPercent;
-  dom.areaThresholdVal.textContent = `${preset.minAreaPercent.toFixed(1)}%`;
-
-  dom.confirmFramesSlider.value = preset.consecutiveFrames;
-  dom.confirmFramesVal.textContent = preset.consecutiveFrames;
-
-  Object.keys(dom.presetButtons).forEach((key) => {
-    dom.presetButtons[key].classList.toggle('active', key === presetName);
-  });
-  dom.customPresetBadge.classList.add('hidden');
-
-  persistSettings();
-  showToast(`Applied ${presetName.toUpperCase()} sensitivity`, 'info');
+    persistSettings();
+    showToast(`Applied ${presetKey.toUpperCase()} sensitivity preset`, 'info');
+  }
 }
 
 function onCustomSliderChange() {
@@ -1492,13 +1652,26 @@ function onCustomSliderChange() {
   dom.customPresetBadge.classList.remove('hidden');
 
   detector.setParameters({
-    pixelDiffThreshold: dom.pixelThresholdSlider.value,
-    minAreaPercent: dom.areaThresholdSlider.value,
-    consecutiveFrames: dom.confirmFramesSlider.value,
+    pixelDiffThreshold: Number(dom.pixelThresholdSlider.value),
+    minAreaPercent: Number(dom.areaThresholdSlider.value),
+    consecutiveFrames: Number(dom.confirmFramesSlider.value),
     cooldownMs: Number(dom.cooldownSlider.value) * 1000
   });
 
-  state.sampleIntervalMs = Number(dom.sampleIntervalSlider.value);
+  persistSettings();
+}
+
+function selectFireThemePreset(themeKey) {
+  state.fireTheme = themeKey;
+  Object.keys(dom.firePresets).forEach((k) => {
+    if (dom.firePresets[k]) {
+      dom.firePresets[k].classList.toggle('active', k === themeKey);
+    }
+  });
+  if (fireRing) {
+    fireRing.setOptions({ theme: themeKey });
+  }
+  broadcastProjectorSync();
   persistSettings();
 }
 
@@ -1506,25 +1679,45 @@ function persistSettings() {
   try {
     const data = {
       zone: state.zone,
-      preset: state.activePreset,
-      pixelDiffThreshold: dom.pixelThresholdSlider.value,
-      minAreaPercent: dom.areaThresholdSlider.value,
-      consecutiveFrames: dom.confirmFramesSlider.value,
-      cooldown: dom.cooldownSlider.value,
-      sampleInterval: dom.sampleIntervalSlider.value,
-      soundType: dom.soundTypeSelect.value,
-      volume: dom.volumeSlider.value,
-      muted: dom.muteToggle.checked,
-      vibrate: dom.vibrateToggle.checked,
-      debug: dom.debugToggle.checked,
       maskColor: state.maskColor,
       maskOpacity: state.maskOpacity,
       videoOnMotion: state.isVideoOnMotion,
-      videoAudio: state.isVideoAudio
+      videoAudio: state.isVideoAudio,
+      preset: state.activePreset,
+      pixelDiffThreshold: detector.pixelDiffThreshold,
+      minAreaPercent: detector.minAreaPercent,
+      consecutiveFrames: detector.consecutiveFrames,
+      cooldown: detector.cooldownMs / 1000,
+      sampleInterval: state.sampleIntervalMs,
+      volume: Math.round(audioAlert.volume * 100),
+      muted: audioAlert.isMuted,
+      soundType: audioAlert.soundType,
+      vibrate: audioAlert.vibrationEnabled,
+      debug: state.debugEnabled,
+
+      // Fire Ring
+      fireEnabled: state.isFireEnabled,
+      fireIntensity: state.fireIntensity,
+      fireThickness: state.fireThickness,
+      fireSpeed: state.fireSpeed,
+      fireTheme: state.fireTheme,
+      fireCustomColor: state.fireCustomColor,
+      fireEmbers: state.fireEmbers,
+      fireGlow: state.fireGlow,
+      fireCrackle: state.fireCrackle,
+      fireCrackleVolume: state.fireCrackleVolume,
+
+      // Feedback Protection
+      guardBandPercent: state.guardBandPercent,
+
+      // Projector Mode & Alignment
+      projectorMode: state.isProjectorMode,
+      alignment: state.alignment,
+      version: 2
     };
     localStorage.setItem('ground_motion_detector_prefs', JSON.stringify(data));
-  } catch (err) {
-    console.warn('Could not persist settings to localStorage:', err);
+  } catch {
+    // Fail silently
   }
 }
 
@@ -1534,6 +1727,21 @@ function loadPersistedSettings() {
     if (!saved) return;
     const data = JSON.parse(saved);
 
+    // Automatically migrate prior session cache to screenshot defaults
+    if (!data.version || data.version < 2) {
+      data.fireIntensity = 2.5;
+      data.fireThickness = 32;
+      data.fireSpeed = 1.0;
+      data.fireTheme = 'orange';
+      data.fireCustomColor = '#ff4500';
+      data.fireEmbers = true;
+      data.fireGlow = true;
+      data.fireCrackle = true;
+      data.fireCrackleVolume = 0.6;
+      data.version = 2;
+      localStorage.setItem('ground_motion_detector_prefs', JSON.stringify(data));
+    }
+
     if (data.zone) {
       state.zone.cx = data.zone.cx ?? 0.5;
       state.zone.cy = data.zone.cy ?? 0.5;
@@ -1541,7 +1749,6 @@ function loadPersistedSettings() {
       clampZoneCoordinates();
     }
 
-    // Mask preferences
     if (data.maskColor) {
       state.maskColor = data.maskColor;
       dom.maskColorPicker.value = data.maskColor;
@@ -1553,7 +1760,6 @@ function loadPersistedSettings() {
       dom.maskOpacityVal.textContent = `${Math.round(state.maskOpacity * 100)}%`;
     }
 
-    // Video preferences
     if (data.videoOnMotion !== undefined) {
       state.isVideoOnMotion = Boolean(data.videoOnMotion);
       dom.videoOnMotionToggle.checked = state.isVideoOnMotion;
@@ -1563,6 +1769,90 @@ function loadPersistedSettings() {
       state.isVideoAudio = Boolean(data.videoAudio);
       dom.videoAudioToggle.checked = state.isVideoAudio;
       if (videoPlayer) videoPlayer.soundEnabled = state.isVideoAudio;
+    }
+
+    // Fire Ring
+    if (data.fireEnabled !== undefined) {
+      state.isFireEnabled = Boolean(data.fireEnabled);
+      dom.fireRingToggle.checked = state.isFireEnabled;
+      if (fireRing) fireRing.setOptions({ enabled: state.isFireEnabled });
+    }
+    if (data.fireIntensity !== undefined) {
+      state.fireIntensity = Number(data.fireIntensity);
+      dom.fireIntensitySlider.value = state.fireIntensity;
+      dom.fireIntensityVal.textContent = `${state.fireIntensity.toFixed(1)}x`;
+      if (fireRing) fireRing.setOptions({ intensity: state.fireIntensity });
+    }
+    if (data.fireThickness !== undefined) {
+      state.fireThickness = Number(data.fireThickness);
+      dom.fireThicknessSlider.value = state.fireThickness;
+      dom.fireThicknessVal.textContent = `${state.fireThickness}px`;
+      if (fireRing) fireRing.setOptions({ thickness: state.fireThickness });
+    }
+    if (data.fireSpeed !== undefined) {
+      state.fireSpeed = Number(data.fireSpeed);
+      dom.fireSpeedSlider.value = state.fireSpeed;
+      dom.fireSpeedVal.textContent = `${state.fireSpeed.toFixed(1)}x`;
+      if (fireRing) fireRing.setOptions({ speed: state.fireSpeed });
+    }
+    if (data.fireTheme) {
+      state.fireTheme = data.fireTheme;
+      selectFireThemePreset(data.fireTheme);
+    }
+    if (data.fireCustomColor) {
+      state.fireCustomColor = data.fireCustomColor;
+      dom.fireCustomColorPicker.value = data.fireCustomColor;
+      dom.fireCustomColorHex.textContent = data.fireCustomColor.toUpperCase();
+      if (fireRing) fireRing.setOptions({ customColor: state.fireCustomColor });
+    }
+    if (data.fireEmbers !== undefined) {
+      state.fireEmbers = Boolean(data.fireEmbers);
+      dom.fireEmbersToggle.checked = state.fireEmbers;
+      if (fireRing) fireRing.setOptions({ embersEnabled: state.fireEmbers });
+    }
+    if (data.fireGlow !== undefined) {
+      state.fireGlow = Boolean(data.fireGlow);
+      dom.fireGlowToggle.checked = state.fireGlow;
+      if (fireRing) fireRing.setOptions({ interiorGlow: state.fireGlow });
+    }
+    if (data.fireCrackle !== undefined) {
+      state.fireCrackle = Boolean(data.fireCrackle);
+      dom.fireCrackleToggle.checked = state.fireCrackle;
+      dom.crackleVolumeGroup.style.display = state.fireCrackle ? 'flex' : 'none';
+      if (fireRing) fireRing.setOptions({ crackleEnabled: state.fireCrackle });
+    }
+    if (data.fireCrackleVolume !== undefined) {
+      state.fireCrackleVolume = Number(data.fireCrackleVolume);
+      dom.fireCrackleVolumeSlider.value = Math.round(state.fireCrackleVolume * 100);
+      dom.fireCrackleVolumeVal.textContent = `${Math.round(state.fireCrackleVolume * 100)}%`;
+      if (fireRing) fireRing.setOptions({ crackleVolume: state.fireCrackleVolume });
+    }
+
+    // Feedback Protection
+    if (data.guardBandPercent !== undefined) {
+      state.guardBandPercent = Number(data.guardBandPercent);
+      dom.guardBandSlider.value = state.guardBandPercent;
+      dom.guardBandVal.textContent = `${state.guardBandPercent}%`;
+      detector.setGuardBandPercent(state.guardBandPercent);
+    }
+
+    // Projector Mode & Alignment
+    if (data.projectorMode !== undefined) {
+      state.isProjectorMode = Boolean(data.projectorMode);
+      dom.projectorModeToggle.checked = state.isProjectorMode;
+      applyProjectorMode(state.isProjectorMode);
+    }
+    if (data.alignment) {
+      state.alignment = { ...state.alignment, ...data.alignment };
+      dom.projectorOffsetXSlider.value = Math.round(state.alignment.offsetX * 100);
+      dom.projectorOffsetXVal.textContent = `${Math.round(state.alignment.offsetX * 100)}%`;
+      dom.projectorOffsetYSlider.value = Math.round(state.alignment.offsetY * 100);
+      dom.projectorOffsetYVal.textContent = `${Math.round(state.alignment.offsetY * 100)}%`;
+      dom.projectorScaleSlider.value = Math.round(state.alignment.scale * 100);
+      dom.projectorScaleVal.textContent = `${Math.round(state.alignment.scale * 100)}%`;
+      dom.projectorFlipHToggle.checked = state.alignment.flipH;
+      dom.projectorFlipVToggle.checked = state.alignment.flipV;
+      dom.projectorRotationSelect.value = String(state.alignment.rotation || 0);
     }
 
     if (data.volume !== undefined) {
@@ -1606,27 +1896,32 @@ function loadPersistedSettings() {
 
     if (data.preset && data.preset !== 'custom') {
       applyPreset(data.preset);
-    } else if (data.pixelDiffThreshold) {
-      dom.pixelThresholdSlider.value = data.pixelDiffThreshold;
-      dom.pixelThresholdVal.textContent = data.pixelDiffThreshold;
-      dom.areaThresholdSlider.value = data.minAreaPercent;
-      dom.areaThresholdVal.textContent = `${Number(data.minAreaPercent).toFixed(1)}%`;
-      dom.confirmFramesSlider.value = data.confirmFrames;
-      dom.confirmFramesVal.textContent = data.confirmFrames;
-      onCustomSliderChange();
+    } else if (data.pixelDiffThreshold || data.minAreaPercent || data.consecutiveFrames) {
+      detector.setParameters({
+        pixelDiffThreshold: data.pixelDiffThreshold,
+        minAreaPercent: data.minAreaPercent,
+        consecutiveFrames: data.consecutiveFrames
+      });
+      dom.pixelThresholdSlider.value = detector.pixelDiffThreshold;
+      dom.pixelThresholdVal.textContent = detector.pixelDiffThreshold;
+      dom.areaThresholdSlider.value = detector.minAreaPercent;
+      dom.areaThresholdVal.textContent = `${detector.minAreaPercent.toFixed(1)}%`;
+      dom.confirmFramesSlider.value = detector.consecutiveFrames;
+      dom.confirmFramesVal.textContent = detector.consecutiveFrames;
+      dom.customPresetBadge.classList.remove('hidden');
     }
-  } catch (err) {
-    console.warn('Could not parse persisted settings:', err);
+  } catch {
+    // Fail silently
   }
 }
 
 /* =========================================================================
-   10. Event Bindings & Initializer
+   12. Event Listeners & Setup
    ========================================================================= */
 
 function initEventListeners() {
   // Primary buttons
-  dom.btnToggleCamera.addEventListener('click', () => {
+  dom.btnStartCamera.addEventListener('click', () => {
     if (state.isCameraActive) {
       stopCamera();
     } else {
@@ -1634,9 +1929,9 @@ function initEventListeners() {
     }
   });
 
-  dom.emptyStartBtn.addEventListener('click', () => startCamera());
+  dom.emptyStartBtn.addEventListener('click', startCamera);
 
-  dom.btnToggleMonitoring.addEventListener('click', () => {
+  dom.btnMonitor.addEventListener('click', () => {
     if (state.isMonitoring) {
       stopMonitoring();
     } else {
@@ -1644,34 +1939,35 @@ function initEventListeners() {
     }
   });
 
-  dom.btnSwitchCamera.addEventListener('click', switchCamera);
-  dom.btnDemoMode.addEventListener('click', toggleDemoMode);
+  dom.btnDemo.addEventListener('click', toggleDemoMode);
   dom.emptyDemoBtn.addEventListener('click', startDemoMode);
 
-  // Monitor View in-view bottom quick bar
+  // Monitor View quick actions
   dom.btnQuickStop.addEventListener('click', (e) => {
     e.stopPropagation();
     stopMonitoring();
   });
+
   dom.btnQuickRecalibrate.addEventListener('click', (e) => {
     e.stopPropagation();
     detector.startCalibration(12, EngineState.CALIBRATING);
-    showToast('Background recalibrating...', 'info');
-  });
-  dom.btnQuickMute.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const nextMuted = !dom.muteToggle.checked;
-    dom.muteToggle.checked = nextMuted;
-    audioAlert.setMuted(nextMuted);
-    dom.btnQuickMute.textContent = nextMuted ? '🔊 Unmute' : '🔇 Mute';
-    persistSettings();
-    showToast(nextMuted ? 'Muted' : 'Unmuted', 'info');
+    showToast('Recalibrating background (~2s)...', 'info');
   });
 
-  // Recalibrate & Reset Zone
+  dom.btnQuickMute.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const newMuted = !audioAlert.isMuted;
+    audioAlert.setMuted(newMuted);
+    dom.muteToggle.checked = newMuted;
+    dom.btnQuickMute.textContent = newMuted ? '🔊 Unmute' : '🔇 Mute';
+    showToast(newMuted ? 'Alert audio muted' : 'Alert audio unmuted', 'info');
+    persistSettings();
+  });
+
+  // Zone actions
   dom.btnRecalibrate.addEventListener('click', () => {
     detector.startCalibration(12, EngineState.CALIBRATING);
-    showToast('Background model recalibrated', 'info');
+    showToast('Recalibrating background (~2s)...', 'info');
   });
 
   dom.btnResetZone.addEventListener('click', () => {
@@ -1680,11 +1976,191 @@ function initEventListeners() {
     state.zone.r = 0.20;
     clampZoneCoordinates();
     drawOverlay();
+    detector.resetBackground();
     persistSettings();
-    showToast('Detection zone reset to center', 'info');
+    showToast('Zone position reset to center', 'info');
   });
 
-  // Feature 1: Mask Controls
+  dom.zoneSizeSlider.addEventListener('input', (e) => {
+    state.zone.r = Number(e.target.value) / 100;
+    clampZoneCoordinates();
+    drawOverlay();
+    detector.resetBackground();
+    persistSettings();
+  });
+
+  // Feature 1: Fire Ring Controls
+  dom.fireRingToggle.addEventListener('change', (e) => {
+    state.isFireEnabled = e.target.checked;
+    if (fireRing) fireRing.setOptions({ enabled: state.isFireEnabled });
+    broadcastProjectorSync();
+    persistSettings();
+  });
+
+  dom.fireIntensitySlider.addEventListener('input', (e) => {
+    state.fireIntensity = Number(e.target.value);
+    dom.fireIntensityVal.textContent = `${state.fireIntensity.toFixed(1)}x`;
+    if (fireRing) fireRing.setOptions({ intensity: state.fireIntensity });
+    broadcastProjectorSync();
+    persistSettings();
+  });
+
+  dom.fireThicknessSlider.addEventListener('input', (e) => {
+    state.fireThickness = Number(e.target.value);
+    dom.fireThicknessVal.textContent = `${state.fireThickness}px`;
+    if (fireRing) fireRing.setOptions({ thickness: state.fireThickness });
+    broadcastProjectorSync();
+    persistSettings();
+  });
+
+  dom.fireSpeedSlider.addEventListener('input', (e) => {
+    state.fireSpeed = Number(e.target.value);
+    dom.fireSpeedVal.textContent = `${state.fireSpeed.toFixed(1)}x`;
+    if (fireRing) fireRing.setOptions({ speed: state.fireSpeed });
+    broadcastProjectorSync();
+    persistSettings();
+  });
+
+  Object.keys(dom.firePresets).forEach((themeKey) => {
+    const btn = dom.firePresets[themeKey];
+    if (btn) {
+      btn.addEventListener('click', () => selectFireThemePreset(themeKey));
+    }
+  });
+
+  dom.fireCustomColorPicker.addEventListener('input', (e) => {
+    state.fireCustomColor = e.target.value;
+    dom.fireCustomColorHex.textContent = e.target.value.toUpperCase();
+    selectFireThemePreset('custom');
+  });
+
+  dom.fireEmbersToggle.addEventListener('change', (e) => {
+    state.fireEmbers = e.target.checked;
+    if (fireRing) fireRing.setOptions({ embersEnabled: state.fireEmbers });
+    broadcastProjectorSync();
+    persistSettings();
+  });
+
+  dom.fireGlowToggle.addEventListener('change', (e) => {
+    state.fireGlow = e.target.checked;
+    if (fireRing) fireRing.setOptions({ interiorGlow: state.fireGlow });
+    broadcastProjectorSync();
+    persistSettings();
+  });
+
+  dom.fireCrackleToggle.addEventListener('change', (e) => {
+    state.fireCrackle = e.target.checked;
+    dom.crackleVolumeGroup.style.display = state.fireCrackle ? 'flex' : 'none';
+    if (fireRing) fireRing.setOptions({ crackleEnabled: state.fireCrackle });
+    persistSettings();
+  });
+
+  dom.fireCrackleVolumeSlider.addEventListener('input', (e) => {
+    state.fireCrackleVolume = Number(e.target.value) / 100;
+    dom.fireCrackleVolumeVal.textContent = `${e.target.value}%`;
+    if (fireRing) fireRing.setOptions({ crackleVolume: state.fireCrackleVolume });
+    persistSettings();
+  });
+
+  // Feature 2: Guard Band Slider
+  dom.guardBandSlider.addEventListener('input', (e) => {
+    state.guardBandPercent = Number(e.target.value);
+    dom.guardBandVal.textContent = `${state.guardBandPercent}%`;
+    detector.setGuardBandPercent(state.guardBandPercent);
+    drawOverlay();
+    persistSettings();
+  });
+
+  // Feature 3: Projector Mode & Alignment Controls
+  dom.projectorModeToggle.addEventListener('change', (e) => {
+    applyProjectorMode(e.target.checked);
+    persistSettings();
+    showToast(state.isProjectorMode ? 'Projector Mode active (Black floor)' : 'Projector Mode disabled', 'info');
+  });
+
+  dom.btnToggleAlignmentGrid.addEventListener('click', () => {
+    state.isAlignmentGridVisible = !state.isAlignmentGridVisible;
+    if (dom.alignmentGridCanvas) {
+      dom.alignmentGridCanvas.classList.toggle('hidden', !state.isAlignmentGridVisible);
+    }
+    dom.btnToggleAlignmentGrid.classList.toggle('active', state.isAlignmentGridVisible);
+    if (state.isAlignmentGridVisible) {
+      drawAlignmentGrid();
+      showToast('Alignment grid active. Adjust sliders to match floor.', 'info');
+    } else {
+      showToast('Alignment grid hidden', 'info');
+    }
+  });
+
+  dom.btnResetAlignment.addEventListener('click', () => {
+    state.alignment = { offsetX: 0, offsetY: 0, scale: 1.0, flipH: false, flipV: false, rotation: 0 };
+    dom.projectorOffsetXSlider.value = 0;
+    dom.projectorOffsetXVal.textContent = '0%';
+    dom.projectorOffsetYSlider.value = 0;
+    dom.projectorOffsetYVal.textContent = '0%';
+    dom.projectorScaleSlider.value = 100;
+    dom.projectorScaleVal.textContent = '100%';
+    dom.projectorFlipHToggle.checked = false;
+    dom.projectorFlipVToggle.checked = false;
+    dom.projectorRotationSelect.value = '0';
+    drawOverlay();
+    persistSettings();
+    showToast('Projector alignment reset to default', 'info');
+  });
+
+  dom.btnOpenProjectorWindow.addEventListener('click', () => {
+    if (!state.projectorWindowRef || state.projectorWindowRef.closed) {
+      state.projectorWindowRef = window.open('projector.html', 'ProjectorWindow', 'width=1280,height=720');
+      showToast('Opened popout projector window. Move it to your projector display!', 'success');
+      setTimeout(broadcastProjectorSync, 500);
+    } else {
+      state.projectorWindowRef.focus();
+    }
+  });
+
+  dom.projectorOffsetXSlider.addEventListener('input', (e) => {
+    state.alignment.offsetX = Number(e.target.value) / 100;
+    dom.projectorOffsetXVal.textContent = `${e.target.value}%`;
+    drawOverlay();
+    persistSettings();
+  });
+
+  dom.projectorOffsetYSlider.addEventListener('input', (e) => {
+    state.alignment.offsetY = Number(e.target.value) / 100;
+    dom.projectorOffsetYVal.textContent = `${e.target.value}%`;
+    drawOverlay();
+    persistSettings();
+  });
+
+  dom.projectorScaleSlider.addEventListener('input', (e) => {
+    state.alignment.scale = Number(e.target.value) / 100;
+    dom.projectorScaleVal.textContent = `${e.target.value}%`;
+    drawOverlay();
+    persistSettings();
+  });
+
+  dom.projectorFlipHToggle.addEventListener('change', (e) => {
+    state.alignment.flipH = e.target.checked;
+    drawOverlay();
+    persistSettings();
+  });
+
+  dom.projectorFlipVToggle.addEventListener('change', (e) => {
+    state.alignment.flipV = e.target.checked;
+    drawOverlay();
+    persistSettings();
+  });
+
+  dom.projectorRotationSelect.addEventListener('change', (e) => {
+    state.alignment.rotation = Number(e.target.value);
+    drawOverlay();
+    persistSettings();
+  });
+
+  // Feature 2.5: Projector Test benchmark
+  dom.btnProjectorTest.addEventListener('click', runProjectorTest);
+
+  // Mask Controls
   dom.maskColorPicker.addEventListener('input', (e) => {
     state.maskColor = e.target.value;
     dom.maskColorHex.textContent = e.target.value.toUpperCase();
@@ -1708,10 +2184,10 @@ function initEventListeners() {
     dom.maskOpacityVal.textContent = '100%';
     drawOverlay();
     persistSettings();
-    showToast('Mask reset to solid black (100%)', 'info');
+    showToast('Outside mask reset to solid black', 'info');
   });
 
-  // Feature 2: Video Alert Controls
+  // Video Alert Controls
   dom.videoOnMotionToggle.addEventListener('change', (e) => {
     state.isVideoOnMotion = e.target.checked;
     if (videoPlayer) videoPlayer.videoEnabled = state.isVideoOnMotion;
@@ -1836,6 +2312,7 @@ function initEventListeners() {
   dom.debugToggle.addEventListener('change', (e) => {
     state.debugEnabled = e.target.checked;
     dom.debugHud.classList.toggle('hidden', !state.debugEnabled);
+    drawOverlay();
     persistSettings();
   });
 
@@ -1861,8 +2338,10 @@ export function cleanup() {
   stopCamera();
   if (state.isDemoMode) stopDemoMode();
   if (videoPlayer) videoPlayer.cleanup();
+  if (fireRing) fireRing.cleanup();
   audioAlert.cleanup();
   detector.destroy();
+  projectorChannel.close();
 }
 
 // Bootstrap
@@ -1875,6 +2354,20 @@ window.addEventListener('DOMContentLoaded', () => {
     unmuteBtn: dom.btnUnmuteVideo,
     videoEnabled: state.isVideoOnMotion,
     soundEnabled: state.isVideoAudio
+  });
+
+  // Initialize Fire Ring engine
+  fireRing = new FireRing(dom.fireCanvas, {
+    enabled: state.isFireEnabled,
+    intensity: state.fireIntensity,
+    thickness: state.fireThickness,
+    speed: state.fireSpeed,
+    theme: state.fireTheme,
+    customColor: state.fireCustomColor,
+    embersEnabled: state.fireEmbers,
+    interiorGlow: state.fireGlow,
+    crackleEnabled: state.fireCrackle,
+    crackleVolume: state.fireCrackleVolume
   });
 
   if (!AudioAlert.isVibrationSupported()) {

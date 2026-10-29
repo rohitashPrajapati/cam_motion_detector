@@ -8,11 +8,12 @@
  * - 3x3 noise reduction box filter
  * - Mean luminance normalization (suppresses global lighting shifts)
  * - Two-tier background model: Running average (absorbs stationary objects) + Previous frame differencing
- * - Circular mask filtering with precomputed lookup table
+ * - Circular mask filtering with precomputed inner detection radius (Fire Guard Band)
+ * - Soft edge threshold falloff (+40% tolerance on outer 15% to absorb flame light-spill and reflections)
  * - Single-pass noise removal (suppresses isolated noise pixels)
  * - Connected-component approximation for largest blob size
- * - Global change guard (detects camera bumps / sudden light switches & suppresses false positives)
- * - State machine with hysteresis and frame confirmation
+ * - Global change guard (excludes projected fire region; detects camera bumps & room lighting switches)
+ * - State machine with hysteresis, frame confirmation, and post-flare recalibration
  * - Zero per-frame object allocation (reuses typed arrays)
  */
 
@@ -57,6 +58,10 @@ export class MotionDetector {
     this.cooldownMs = options.cooldownMs ?? 2000;
     this.calibrationTotalFrames = options.calibrationFrames ?? 12; // ~2 seconds at 150ms intervals
     
+    // Feature 2: Fire Guard Band (Active detection radius = base radius * (1 - guardBandPercent/100))
+    this.guardBandPercent = options.guardBandPercent !== undefined ? options.guardBandPercent : 10; // Default 10%
+    this.innerRadiusRatio = Math.max(0.6, (100 - this.guardBandPercent) / 100);
+
     // Background model learning rate: alpha ~ 0.04
     // Gives roughly a 25-frame (~3.7s) half-life for stationary objects to assimilate
     this.learningRate = options.learningRate ?? 0.04;
@@ -84,20 +89,21 @@ export class MotionDetector {
     this.totalPixels = 0;
     this.circlePixelCount = 0;
 
-    // Guard buffer dimensions (outer ring / full frame thumbnail)
+    // Guard buffer dimensions (outer region excluding flame zone)
     this.guardWidth = 0;
     this.guardHeight = 0;
     this.guardTotalPixels = 0;
 
     // Typed arrays for zero-allocation buffer reuse
-    this.mask = null;             // Uint8Array: 1 inside circle, 0 outside
-    this.currentGray = null;      // Uint8Array: Grayscale + normalized current frame
-    this.blurredGray = null;      // Uint8Array: 3x3 blurred current frame
-    this.backgroundModel = null;  // Float32Array: Running average background
-    this.previousGray = null;     // Uint8Array: Previous processed frame
-    this.diffMask = null;         // Uint8Array: 255 for changed, 0 otherwise
-    this.tempBinary = null;       // Uint8Array: For connected-component / noise pass
-    this.labels = null;           // Int32Array: Connected component labeling
+    this.mask = null;                 // Uint8Array: 1 inside active detection circle, 0 outside
+    this.pixelThresholdScale = null;  // Float32Array: Soft edge threshold falloff multiplier (1.0 to 1.4)
+    this.currentGray = null;          // Uint8Array: Grayscale + normalized current frame
+    this.blurredGray = null;          // Uint8Array: 3x3 blurred current frame
+    this.backgroundModel = null;      // Float32Array: Running average background
+    this.previousGray = null;         // Uint8Array: Previous processed frame
+    this.diffMask = null;             // Uint8Array: 255 for changed, 0 otherwise
+    this.tempBinary = null;           // Uint8Array: For connected-component / noise pass
+    this.labels = null;               // Int32Array: Connected component labeling
 
     // Guard buffers
     this.guardCurrentGray = null;
@@ -132,6 +138,7 @@ export class MotionDetector {
     this.guardTotalPixels = guardWidth * guardHeight;
 
     this.mask = new Uint8Array(this.totalPixels);
+    this.pixelThresholdScale = new Float32Array(this.totalPixels);
     this.currentGray = new Uint8Array(this.totalPixels);
     this.blurredGray = new Uint8Array(this.totalPixels);
     this.backgroundModel = new Float32Array(this.totalPixels);
@@ -143,11 +150,25 @@ export class MotionDetector {
     this.guardCurrentGray = new Uint8Array(this.guardTotalPixels);
     this.guardBackground = new Float32Array(this.guardTotalPixels);
 
-    // Precompute circular mask for the inner square ROI
+    this._generateCircularMask();
+    this.resetBackground();
+  }
+
+  /**
+   * Precompute circular detection mask with inner guard band and edge threshold falloff.
+   */
+  _generateCircularMask() {
+    if (!this.mask || this.width === 0 || this.height === 0) return;
+
+    const width = this.width;
+    const height = this.height;
     const cx = (width - 1) / 2;
     const cy = (height - 1) / 2;
-    const radius = Math.min(cx, cy);
-    const radiusSq = radius * radius;
+    const baseRadius = Math.min(cx, cy);
+
+    // Active detection radius excludes the lit fire ring and flame reach
+    const activeRadius = baseRadius * this.innerRadiusRatio;
+    const activeRadiusSq = activeRadius * activeRadius;
 
     let circleCount = 0;
     for (let y = 0; y < height; y++) {
@@ -155,18 +176,50 @@ export class MotionDetector {
       const dySq = dy * dy;
       for (let x = 0; x < width; x++) {
         const dx = x - cx;
+        const distSq = dx * dx + dySq;
         const idx = y * width + x;
-        if (dx * dx + dySq <= radiusSq) {
+
+        if (distSq <= activeRadiusSq) {
           this.mask[idx] = 1;
           circleCount++;
+
+          // Light-spill robustness: soft threshold falloff
+          // Pixels near the outer ~15% of the inner active circle have a raised threshold
+          // (up to +40% at perimeter) to absorb ambient fire flicker and reflections.
+          // Formula: scale = 1.0 + 0.40 * max(0, (normalizedDist - 0.85) / 0.15)
+          const dist = Math.sqrt(distSq);
+          const u = activeRadius > 0 ? (dist / activeRadius) : 0;
+          if (u > 0.85) {
+            const edgeFactor = Math.min(1.0, (u - 0.85) / 0.15);
+            this.pixelThresholdScale[idx] = 1.0 + 0.40 * edgeFactor;
+          } else {
+            this.pixelThresholdScale[idx] = 1.0;
+          }
         } else {
           this.mask[idx] = 0;
+          this.pixelThresholdScale[idx] = 1.0;
         }
       }
     }
-    this.circlePixelCount = circleCount > 0 ? circleCount : this.totalPixels;
 
-    this.resetBackground();
+    this.circlePixelCount = circleCount > 0 ? circleCount : this.totalPixels;
+  }
+
+  /**
+   * Update the Fire Guard Band percentage (e.g. 10%).
+   */
+  setGuardBandPercent(percent) {
+    this.guardBandPercent = Math.max(2, Math.min(40, Number(percent)));
+    this.innerRadiusRatio = Math.max(0.6, (100 - this.guardBandPercent) / 100);
+    this._generateCircularMask();
+  }
+
+  getGuardBandPercent() {
+    return this.guardBandPercent;
+  }
+
+  getActiveRadiusRatio() {
+    return this.innerRadiusRatio;
   }
 
   /**
@@ -206,18 +259,19 @@ export class MotionDetector {
   /**
    * Set custom parameter overrides.
    */
-  setParameters({ pixelDiffThreshold, minAreaPercent, consecutiveFrames, cooldownMs }) {
+  setParameters({ pixelDiffThreshold, minAreaPercent, consecutiveFrames, cooldownMs, guardBandPercent }) {
     if (pixelDiffThreshold !== undefined) this.pixelDiffThreshold = Number(pixelDiffThreshold);
     if (minAreaPercent !== undefined) this.minAreaPercent = Number(minAreaPercent);
     if (consecutiveFrames !== undefined) this.consecutiveFrames = Number(consecutiveFrames);
     if (cooldownMs !== undefined) this.cooldownMs = Number(cooldownMs);
+    if (guardBandPercent !== undefined) this.setGuardBandPercent(guardBandPercent);
   }
 
   /**
    * Primary processing pipeline.
    * 
    * @param {ImageData} roiImageData Cropped bounding box of circle (~96-128px)
-   * @param {ImageData|null} guardImageData Downscaled full-frame or outer region thumbnail
+   * @param {ImageData|null} guardImageData Downscaled thumbnail of region OUTSIDE fire ring
    * @param {number} timestamp Performance timestamp in ms
    * @returns {Object} Analysis metrics and state
    */
@@ -231,7 +285,7 @@ export class MotionDetector {
     const gh = guardImageData ? guardImageData.height : 24;
     this.initBuffers(w, h, gw, gh);
 
-    // 1. Convert ROI to Grayscale and compute Mean Luminance inside circular mask
+    // 1. Convert ROI to Grayscale and compute Mean Luminance inside active circular mask
     const srcData = roiImageData.data;
     const total = this.totalPixels;
     let sumLuminance = 0;
@@ -260,7 +314,7 @@ export class MotionDetector {
     // 3. 3x3 Box Blur to suppress camera sensor high-frequency noise
     this._apply3x3Blur(this.currentGray, this.blurredGray, w, h);
 
-    // 4. Global Change Guard Inspection (Outer region / Full Frame)
+    // 4. Global Change Guard Inspection (Outer region strictly excluding lit fire band)
     let globalChangeDetected = false;
     let guardChangeRatio = 0;
 
@@ -286,7 +340,9 @@ export class MotionDetector {
         isSuppressed: true,
         suppressionReason: this.suppressionReason,
         diffMask: this.diffMask,
-        calibrationProgress: 0
+        calibrationProgress: 0,
+        activeRadiusRatio: this.innerRadiusRatio,
+        guardBandPercent: this.guardBandPercent
       };
     }
 
@@ -297,7 +353,7 @@ export class MotionDetector {
       this.state = EngineState.SUPPRESSED;
       this.candidateFrameCount = 0;
       this.resetBackground();
-      this.state = EngineState.SUPPRESSED; // Keep suppressed state indicator
+      this.state = EngineState.SUPPRESSED;
 
       return {
         state: this.state,
@@ -309,7 +365,9 @@ export class MotionDetector {
         isSuppressed: true,
         suppressionReason: this.suppressionReason,
         diffMask: this.diffMask,
-        calibrationProgress: 0
+        calibrationProgress: 0,
+        activeRadiusRatio: this.innerRadiusRatio,
+        guardBandPercent: this.guardBandPercent
       };
     }
 
@@ -339,16 +397,19 @@ export class MotionDetector {
         isSuppressed: false,
         suppressionReason: '',
         diffMask: this.diffMask,
-        calibrationProgress: this.calibrationFrameCount / this.calibrationTotalFrames
+        calibrationProgress: this.calibrationFrameCount / this.calibrationTotalFrames,
+        activeRadiusRatio: this.innerRadiusRatio,
+        guardBandPercent: this.guardBandPercent
       };
     }
 
-    // 6. Motion Differencing inside Circular Mask
-    // Combine differences against:
+    // 6. Motion Differencing inside Active Circular Mask
+    // Combines differences against:
     // a) Long-term running background model
     // b) Previous frame (ensures sudden motion isn't masked by fast adaptations)
+    // Applies soft threshold scale for pixels near the flame boundary
     let changedCount = 0;
-    const threshold = this.pixelDiffThreshold;
+    const baseThresh = this.pixelDiffThreshold;
 
     // Reset diff mask
     this.diffMask.fill(0);
@@ -363,8 +424,9 @@ export class MotionDetector {
       const diffBg = Math.abs(curr - bg);
       const diffPrev = Math.abs(curr - prev);
 
-      // Pixel is considered changed if it differs significantly from the background model
-      // OR has sudden delta from previous frame while differing from background
+      // Pixel-specific threshold with soft falloff near edges
+      const threshold = baseThresh * this.pixelThresholdScale[i];
+
       if (diffBg >= threshold || (diffPrev >= threshold && diffBg >= (threshold * 0.7))) {
         this.diffMask[i] = 255;
         changedCount++;
@@ -374,7 +436,7 @@ export class MotionDetector {
     // 7. Single-Pass Noise Filtering: Suppress isolated changed pixels
     const filteredChangedCount = this._filterIsolatedNoise(this.diffMask, this.tempBinary, w, h);
 
-    // 8. Metric Calculation: Changed Percentage inside Circle
+    // 8. Metric Calculation: Changed Percentage inside Active Circle
     const changedPercent = (filteredChangedCount / this.circlePixelCount) * 100;
     this.lastChangedPercent = changedPercent;
 
@@ -384,8 +446,6 @@ export class MotionDetector {
     this.lastBlobPercent = blobPercent;
 
     // 10. Background Model Adaptive Update
-    // Pixels NOT in motion learn at normal rate; pixels IN motion learn at a much slower rate
-    // to allow stationary objects to gradually blend in without instant ghosts
     const alpha = this.learningRate;
     const slowAlpha = alpha * 0.15;
 
@@ -445,7 +505,6 @@ export class MotionDetector {
         this.quietFrameCount = 0;
       }
     } else if (this.state === EngineState.COOLDOWN) {
-      // In cooldown: alert sound does not re-trigger, but if motion remains, keep cooldown warm
       if (meetsEnterCondition) {
         this.lastAlertTime = timestamp;
       }
@@ -463,7 +522,9 @@ export class MotionDetector {
       isSuppressed: false,
       suppressionReason: '',
       diffMask: this.tempBinary, // Clean binary mask for debug view
-      calibrationProgress: 1.0
+      calibrationProgress: 1.0,
+      activeRadiusRatio: this.innerRadiusRatio,
+      guardBandPercent: this.guardBandPercent
     };
   }
 
@@ -491,14 +552,22 @@ export class MotionDetector {
   }
 
   /**
-   * Process guard thumbnail (full-frame or outer ring) to detect global lighting/bump changes.
+   * Process guard thumbnail (strictly excluding the circle and fire flame reach).
+   * Transparent pixels (alpha === 0) represent the excluded fire zone and are skipped.
    */
   _processGuard(guardImageData) {
     const data = guardImageData.data;
     const len = this.guardTotalPixels;
     let changedPixels = 0;
+    let validPixels = 0;
 
     for (let i = 0, p = 0; i < len; i++, p += 4) {
+      // Skip pixels that are masked out (circle & flame light spill band)
+      if (data[p + 3] === 0) {
+        continue;
+      }
+
+      validPixels++;
       const gray = (data[p] * 77 + data[p + 1] * 150 + data[p + 2] * 29) >> 8;
       this.guardCurrentGray[i] = gray;
 
@@ -514,7 +583,7 @@ export class MotionDetector {
       }
     }
 
-    return changedPixels / len;
+    return validPixels > 0 ? (changedPixels / validPixels) : 0;
   }
 
   /**
@@ -565,7 +634,6 @@ export class MotionDetector {
       for (let x = 1; x < w - 1; x++) {
         const startIdx = row + x;
         if (binary[startIdx] === 255 && labels[startIdx] === 0) {
-          // Start BFS for component
           let blobSize = 0;
           let head = 0;
           let tail = 0;
@@ -653,6 +721,7 @@ export class MotionDetector {
    */
   destroy() {
     this.mask = null;
+    this.pixelThresholdScale = null;
     this.currentGray = null;
     this.blurredGray = null;
     this.backgroundModel = null;

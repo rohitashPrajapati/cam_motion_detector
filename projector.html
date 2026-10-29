@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Ground Motion Detector - Projector Display</title>
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    html, body {
+      width: 100vw;
+      height: 100vh;
+      width: 100dvw;
+      height: 100dvh;
+      background: #000000;
+      overflow: hidden;
+      user-select: none;
+      -webkit-user-select: none;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    #projectorContainer {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      background: #000000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #projectorFireCanvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 10;
+    }
+    #projectorVideo {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #000000;
+      z-index: 50;
+      display: none;
+    }
+    .status-toast {
+      position: absolute;
+      top: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(17, 24, 39, 0.88);
+      color: #93c5fd;
+      border: 1px solid rgba(59, 130, 246, 0.4);
+      padding: 8px 16px;
+      border-radius: 9999px;
+      font-size: 0.82rem;
+      font-weight: 500;
+      z-index: 100;
+      pointer-events: none;
+      transition: opacity 0.4s ease;
+      backdrop-filter: blur(8px);
+    }
+    .status-toast.fade-out {
+      opacity: 0;
+    }
+    .fullscreen-hint {
+      position: absolute;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(255, 255, 255, 0.4);
+      font-size: 0.75rem;
+      z-index: 90;
+      pointer-events: none;
+      transition: opacity 0.4s ease;
+    }
+  </style>
+</head>
+<body>
+  <div id="projectorContainer">
+    <canvas id="projectorFireCanvas"></canvas>
+    <video id="projectorVideo" playsinline muted></video>
+    <div id="statusToast" class="status-toast">Projector Window Active • Double-click for Fullscreen</div>
+    <div id="fullscreenHint" class="fullscreen-hint">Mirrored via BroadcastChannel</div>
+  </div>
+
+  <script type="module">
+    import { FireRing } from './fire-ring.js';
+
+    const canvas = document.getElementById('projectorFireCanvas');
+    const videoEl = document.getElementById('projectorVideo');
+    const toast = document.getElementById('statusToast');
+    const hint = document.getElementById('fullscreenHint');
+
+    const fireRing = new FireRing(canvas, { enabled: true });
+    fireRing.start();
+
+    function resizeCanvas() {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      fireRing.resize(w, h);
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    // Fade out status toast after 4s
+    setTimeout(() => {
+      if (toast) toast.classList.add('fade-out');
+      if (hint) hint.classList.add('fade-out');
+    }, 4000);
+
+    // Double click to toggle native fullscreen on projector display
+    window.addEventListener('dblclick', () => {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(() => {});
+      } else {
+        document.exitFullscreen().catch(() => {});
+      }
+    });
+
+    // BroadcastChannel sync
+    const channel = new BroadcastChannel('ground_motion_projector');
+
+    channel.onmessage = (event) => {
+      const data = event.data;
+      if (!data) return;
+
+      if (data.type === 'sync') {
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+
+        // Apply alignment transforms
+        const align = data.alignment || { offsetX: 0, offsetY: 0, scale: 1.0, flipH: false, flipV: false, rotation: 0 };
+        let nx = data.circle.cx - 0.5;
+        let ny = data.circle.cy - 0.5;
+
+        if (align.flipH) nx = -nx;
+        if (align.flipV) ny = -ny;
+
+        const rad = (align.rotation || 0) * Math.PI / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+        const rx = nx * cos - ny * sin;
+        const ry = nx * sin + ny * cos;
+
+        const scale = align.scale || 1.0;
+        const finalNx = 0.5 + rx * scale + (align.offsetX || 0);
+        const finalNy = 0.5 + ry * scale + (align.offsetY || 0);
+        const finalNr = data.circle.r * scale;
+
+        fireRing.setCircle(finalNx * w, finalNy * h, finalNr * Math.min(w, h));
+        if (data.fireOptions) {
+          fireRing.setOptions(data.fireOptions);
+        }
+      } else if (data.type === 'flare') {
+        fireRing.flare(data.duration || 500);
+      } else if (data.type === 'video_play') {
+        if (data.src && videoEl.src !== data.src) {
+          videoEl.src = data.src;
+        }
+        videoEl.style.display = 'block';
+        videoEl.play().catch(() => {});
+      } else if (data.type === 'video_stop') {
+        videoEl.pause();
+        videoEl.style.display = 'none';
+      } else if (data.type === 'stop') {
+        fireRing.stop();
+      } else if (data.type === 'start') {
+        fireRing.start();
+      }
+    };
+
+    window.addEventListener('beforeunload', () => {
+      channel.close();
+      fireRing.cleanup();
+    });
+  </script>
+</body>
+</html>
